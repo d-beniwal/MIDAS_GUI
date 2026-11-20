@@ -22,7 +22,7 @@ from mcp.server.mcpserver import MCPServer
 from client import ControlClient, ControlError
 
 _INSTRUCTIONS = """\
-Drives the live midas-gui app (Data Viewer, Calibrate, Solve Cell tabs).
+Drives the live midas-gui app (Data Viewer, Calibrate, Solve Cell, Hydra Batch Integrate).
 Before driving a tab, read the matching skill under midas_gui_mcp/skills/
 (in the midas-gui repo): midas-gui-mcp-setup (launch, register, socket
 troubleshooting) and midas-gui-mcp-calibrate (calibration gotchas: calibrant,
@@ -814,6 +814,112 @@ def project_open(path: str, discard_unsaved: bool = False,
     first to keep them."""
     return _call("project.open", path=path, discard_unsaved=discard_unsaved,
                  exclude=exclude)
+
+
+# ── Hydra Batch Integrate ────────────────────────────────────────────
+# Four-panel (ge1..ge4) integration through the Batch Integrate tab's Hydra
+# page. Typical flow: hydra_batch_set_scans -> hydra_batch_set_calibration ->
+# (optional) set_caking / set_options -> hydra_batch_run -> hydra_batch_wait.
+# For SEVERAL datasets that each need their own calibration set, use
+# hydra_batch_run_queue (one call, runs them back to back). Settings persist
+# in the GUI between calls; read them with hydra_batch_get_state.
+
+@mcp.tool()
+def hydra_batch_get_state() -> Any:
+    """Per-panel calibration source/file and caking, the integration options,
+    the scan plan (output dir + panel files per scan), the shared auto R max,
+    whether a run is active, and the last run's report."""
+    return _call("hydra_batch.get_state")
+
+
+@mcp.tool()
+def hydra_batch_set_scans(paths: list[str], output_dir: Optional[str] = None,
+                          dark: Optional[str] = None) -> Any:
+    """Select the scan(s) to integrate. paths: one ge1..ge4 panel file per scan
+    (the other three panels are found by name); several paths from different
+    folders make several scans. output_dir: where results go (each panel
+    writes to <output_dir>/geN). dark: one panel's dark file (the others are
+    derived by the ge token); "" unticks the dark. Returns the scan plan."""
+    return _call("hydra_batch.set_scans", paths=paths, output_dir=output_dir, dark=dark)
+
+
+@mcp.tool()
+def hydra_batch_set_calibration(files: Optional[dict] = None,
+                                from_file: Optional[str] = None) -> Any:
+    """Set each panel's calibration file. Give files={"ge1": path, ...} or
+    from_file=<one panel's calibration file> to find the other three by the
+    ge token. Exactly one of the two."""
+    return _call("hydra_batch.set_calibration", files=files, from_file=from_file)
+
+
+@mcp.tool()
+def hydra_batch_set_caking(r_min: Optional[float] = None, r_max: Optional[float] = None,
+                           r_bin: Optional[float] = None, eta_min: Optional[float] = None,
+                           eta_max: Optional[float] = None, eta_bin: Optional[float] = None,
+                           panels: Optional[list[str]] = None) -> Any:
+    """Set caking for all panels (or panels=["ge1",...]). R in pixels, eta in
+    degrees. r_max=0 means auto, which is ONE value shared by all panels (the
+    largest farthest-corner), so the four panels' cakes can be merged. An
+    explicit r_max must be the same on every panel for the ge1234 merge."""
+    return _call("hydra_batch.set_caking", r_min=r_min, r_max=r_max, r_bin=r_bin,
+                 eta_min=eta_min, eta_max=eta_max, eta_bin=eta_bin, panels=panels)
+
+
+@mcp.tool()
+def hydra_batch_set_options(kernel: Optional[str] = None, formats: Optional[list[str]] = None,
+                            run_mode: Optional[str] = None, frame_run_mode: Optional[str] = None,
+                            zarr_grouping: Optional[str] = None, combine_zarr: Optional[bool] = None,
+                            n_workers: Optional[int] = None, frame_start: Optional[int] = None,
+                            frame_end: Optional[int] = None, frame_stride: Optional[int] = None) -> Any:
+    """Integration options. kernel: subpixel2|subpixel4|hard|polygon. formats:
+    output format keys (e.g. ["csv","zarr"]). run_mode: sequential|parallel
+    (panels). frame_run_mode: sequential|batch_parallel. zarr_grouping:
+    frame|file|run. combine_zarr: merge the four panels into ge1234 archives
+    (needs the zarr format). frame_end=0 means last frame."""
+    return _call("hydra_batch.set_options", kernel=kernel, formats=formats, run_mode=run_mode,
+                 frame_run_mode=frame_run_mode, zarr_grouping=zarr_grouping,
+                 combine_zarr=combine_zarr, n_workers=n_workers, frame_start=frame_start,
+                 frame_end=frame_end, frame_stride=frame_stride)
+
+
+@mcp.tool()
+def hydra_batch_run() -> Any:
+    """Start integrating the selected scan(s). Async: returns a job_id for
+    hydra_batch_wait / hydra_batch_get_job. Refuses (precondition_failed) with
+    a reason instead of opening a dialog when something is missing."""
+    return _call("hydra_batch.run")
+
+
+@mcp.tool()
+def hydra_batch_run_queue(jobs: list[dict], stop_on_error: bool = False) -> Any:
+    """Run several datasets back to back, each with its own calibration set.
+    Each job: {"name", "scans": [one panel file per scan], "calibration":
+    {"files": {"ge1":...}} or {"from_file": path}, "output_dir", optional
+    "dark", "caking" (same keys as hydra_batch_set_caking), "options" (same
+    keys as hydra_batch_set_options)}. All jobs are validated first. Returns
+    one job_id; hydra_batch_wait returns per-job status and reports."""
+    return _call("hydra_batch.run_queue", jobs=jobs, stop_on_error=stop_on_error)
+
+
+@mcp.tool()
+def hydra_batch_get_job(job_id: str) -> Any:
+    """Status of a hydra_batch_run / hydra_batch_run_queue job: running, done,
+    failed or aborted, with a per-scan, per-panel report (frames, errors,
+    combine outcome) and, while running, the log tail."""
+    return _call("hydra_batch.get_job", job_id=job_id)
+
+
+@mcp.tool()
+def hydra_batch_wait(job_id: str, timeout: float = 600.0) -> Any:
+    """Block up to timeout seconds until the job leaves "running", then return
+    its status/report. If it is still running, call again."""
+    return _call("hydra_batch.wait", job_id=job_id, timeout=timeout)
+
+
+@mcp.tool()
+def hydra_batch_abort() -> Any:
+    """Abort the running Hydra batch run (and stop a running queue)."""
+    return _call("hydra_batch.abort")
 
 
 if __name__ == "__main__":

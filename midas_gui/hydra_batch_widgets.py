@@ -537,18 +537,26 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
         or ``(None, note)`` if unavailable. Also backs the "View calibration"
         popup (see helpers.make_calib_values_button), called fresh each time
         it's opened."""
-        return resolve_calibration_fields(
+        fields, note = resolve_calibration_fields(
             self.result, self._use_file_btn.isChecked(), self._json_ed.text(),
             source_label=f"Calibrate tab (ge{self.panel_number})")
+        return self._pin_tx(fields), note
+
+    def _pin_tx(self, d):
+        """``d`` with tx forced to this panel's fixed installation azimuth
+        (``hydra.HYDRA_PANEL_TX``), whatever the calibration source says."""
+        from midas_gui import hydra
+        return hydra.pin_tx(d, self.panel_number)
 
     def full_calib_snapshot(self):
         """This panel's active geometry as the *whole* calibration rather than
         the display subset — what gets recorded as an integration attempt's
         ``calibration_snapshot`` (see
         ``helpers.full_calibration_snapshot``)."""
-        return full_calibration_snapshot(
+        snap, note = full_calibration_snapshot(
             self.result, self._use_file_btn.isChecked(), self._json_ed.text(),
             source_label=f"Calibrate tab (ge{self.panel_number})")
+        return self._pin_tx(snap), note
 
     def resolved_im_trans(self) -> tuple:
         """ImTransOpt codes from this panel's active calibration source — see
@@ -562,7 +570,7 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
     def file_path(self) -> str:
         return self._json_ed.text().strip()
 
-    def resolved_spec(self):
+    def resolved_spec(self, auto_r_max=None):
         """Build an ``IntegrationSpec`` from whichever calibration source is
         active, caked by THIS panel's own six values — raises if neither a
         Calibrate-tab result nor a valid file is set.
@@ -576,9 +584,16 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
         Rmax 0.0 is the "auto" sentinel the spinbox documents, passed as
         None so ``spec_from_calibration_result`` picks the farthest corner
         itself rather than integrating out to a literal zero radius.
+
+        ``auto_r_max`` is what an auto Rmax resolves to when the caller
+        wants ONE value for the whole array (see
+        ``HydraBatchPage.shared_auto_rmax``). Per-panel auto gives each
+        panel its own farthest corner, so n_R differs between panels and
+        the four-panel zarr combine cannot stack them. An explicit Rmax on
+        this card still wins.
         """
         c = self.caking()
-        r_max = c["R_MAX"] or None            # 0.0 = auto, not a radius
+        r_max = c["R_MAX"] or auto_r_max or None   # 0.0 = auto, not a radius
         kw = dict(r_min=c["R_MIN"], r_max=r_max,
                   eta_min=c["ETA_MIN"], eta_max=c["ETA_MAX"])
         if not self._use_file_btn.isChecked():
@@ -586,12 +601,27 @@ class HydraBatchPanelCard(QtWidgets.QWidget):
                 raise RuntimeError(
                     f"ge{self.panel_number}: no calibration from the Calibrate tab. "
                     "Run its Hydra fit first.")
-            return _build_spec(self.result, c["R_STEP"], c["ETA_STEP"], **kw)
+            return self._with_fixed_tx(
+                _build_spec(self.result, c["R_STEP"], c["ETA_STEP"], **kw))
         path = self._json_ed.text().strip()
         if not path or not Path(path).exists():
             raise FileNotFoundError(
                 f"ge{self.panel_number}: calibration file not found: {path}")
-        return spec_from_geometry_file(path, c["R_STEP"], c["ETA_STEP"], **kw)
+        return self._with_fixed_tx(
+            spec_from_geometry_file(path, c["R_STEP"], c["ETA_STEP"], **kw))
+
+    def _with_fixed_tx(self, spec):
+        """Set the spec's tx to this panel's fixed installation azimuth. The
+        backend's eta is the in-plane angle + tx, so a file or result carrying
+        tx = 0 (never fitted) would put every panel on the same wedge."""
+        from midas_gui import hydra
+        tx = hydra.fixed_tx(self.panel_number)
+        cur = getattr(spec, "tx", None)
+        if tx is not None and cur is not None:
+            import torch
+            spec.tx = torch.as_tensor(tx, dtype=getattr(cur, "dtype", None),
+                                      device=getattr(cur, "device", None))
+        return spec
 
     # ── Progress ─────────────────────────────────────────────────────
 

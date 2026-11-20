@@ -4,6 +4,10 @@ Last updated: 2026-11-17 (d-spacing x-axis + pixel R readout)
 
 ## Now working on
 
+2026-11-19 (evening): **Hydra tx fixed to 300/30/120/210 everywhere** (viewer, Calibrate seed, Batch, defaults, `batch_cli --tx`; DECISIONS 2026-11-19 evening); real connoly_oct26 R-eta map made via `hydra_batch` ops. Uncommitted. Open: tx values were read off a screenshot; Batch Queue/tab_queue not pinned; two calibrate tests fail on HEAD too (demo image).
+
+2026-11-19: **Hydra-via-MCP benchmark** (`test_data/hydra_mcp_bench/`, DECISIONS 2026-11-19): MCP has no Hydra/Batch ops; headless Hydra combine fails with auto R max (per-panel n_R differs); fixed R range works. **Superseded same day:** `hydra_batch.*` ops + shared auto Rmax implemented and bench-verified (DECISIONS 2026-11-19 later); uncommitted. Also stale: d/R work is committed (802d72d).
+
 2026-11-17: **d (Å) added to every radial-profile X dropdown** (ProfileViewer, Waterfall, Stacked, Hydra profile, Pump Probe; Cake/Zarr already had it) and the shared pixel readout now prints `R = … px` (all tabs using `pixel_readout_text`). Offscreen smoke + targeted tests pass; **uncommitted, not live-checked.**
 
 2026-11-15 (test audit): full suite per-file = **3383 passed / 10 skipped / 0 failed** (was 11 failing files; all were stale tests, not product bugs). `pytest-forked` intentionally NOT installed (breaks on pytest 9 + segfaults Qt children; DECISIONS 2026-11-15). **Open:** Batch Integrate runs K=2 at resonant R bins (SubpixelResonanceWarning) unlike the Data Viewer, which swaps to polygon; the `pytest-forked` pins in the env files are misleading.
@@ -88,6 +92,7 @@ View details: DECISIONS 2026-10-24 and `documentation/solve_cell_visualizations.
 
 ## Next steps
 
+- Re-run `hydra_mcp_bench` through the real MCP server (register `midas-gui`, new client session); test per-panel eta wedges + Q bins via the ops; consider the same shared-Rmax rule in `batch_cli`.
 - (Planned, not started) Solve Cell phase identification: Symmetry stage -> intensities -> Laue merging -> phase matching; full plan in ROADMAP "Solve Cell: from lattice to phase identification".
 - Ask backend (midas_calibrate_v2) to forward `rings_to_exclude` through `iterate_frozen_point_until_stable` and `first_time_calibrate`; then drop the two GUI warnings in `calib.run_pipeline` (DECISIONS 2026-11-07).
 - Live-check the combined calibration on representative beamline data; later

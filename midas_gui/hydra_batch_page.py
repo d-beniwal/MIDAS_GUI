@@ -88,8 +88,14 @@ class _PanelViewerPair(QtWidgets.QWidget):
 
 
 class HydraBatchPage(QtWidgets.QWidget):
+    #: Emitted once when a run ends (completed, failed panels included, or
+    #: aborted), carrying ``run_report()``. How the control API (an agent)
+    #: learns a run is over without polling widget state.
+    runFinished = QtCore.pyqtSignal(dict)
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._report: dict = {"scans": [], "cancelled": False, "running": False}
         self._cards: dict = {}           # panel_num -> HydraBatchPanelCard
         self._viewer_pairs: dict = {}    # panel_num -> _PanelViewerPair
         self._expid_provider = None      # () -> str, forwarded by BatchTab
@@ -1344,6 +1350,7 @@ class HydraBatchPage(QtWidgets.QWidget):
                 skipped.append(f"ge{n}")
                 continue
             st = self._states.setdefault(n, hydra.DetectorState())
+            st.panel = n
             # Re-applied on every build rather than tracked for dirtiness:
             # correctness then does not depend on the invalidation list being
             # complete, only on WHETHER we rebuild. It is a dict read, and
@@ -1476,16 +1483,23 @@ class HydraBatchPage(QtWidgets.QWidget):
         bc_y, bc_z = bc
         step = float(max(1, int(hydra.COMPOSITE_DISPLAY_STEP)))
         drawn = False
+        shared_rmax = None
         for n in self._composite_panels:
             card = self._cards.get(n)
             if card is None:
                 continue
             cake = card.caking()
             if not cake["R_MAX"]:
-                # 0 = "auto, resolve per panel from its own corner". That
-                # answer is a per-panel pixel count and the composite is not
-                # the place to invent one; the panel's own view fills it in.
-                continue
+                # 0 = auto = the ONE radius every panel will integrate to
+                # (shared_auto_rmax). Drawn, never written into the card:
+                # the composite canvas must not leak a derived radius into a
+                # panel's real setting.
+                shared = shared_rmax if shared_rmax is not None \
+                    else self.shared_auto_rmax()
+                shared_rmax = shared
+                if not shared:
+                    continue
+                cake = dict(cake, R_MAX=shared)
             draw_polar_bin_overlay(
                 self._det_view, self._bin_overlay_items,
                 bc_y=bc_y, bc_z=bc_z,
@@ -1560,11 +1574,15 @@ class HydraBatchPage(QtWidgets.QWidget):
                 bc_y=0.0, bc_z=0.0, r_min=0.0, r_max=0.0, r_bin=1.0, e_bin=5.0)
             return
         cake = card.caking()
-        if cake["R_MAX"] == 0.0:          # 0 = auto, resolved per panel
-            card.set_caking({"R_MAX": rmax_corner_px(
+        if cake["R_MAX"] == 0.0:
+            # 0 = auto -> the ONE value shared by every panel (what the run
+            # will use), drawn but NOT written into the card: writing a
+            # per-panel number back made "auto" turn into four different
+            # explicit radii the first time each panel was previewed, which
+            # is what broke the combine. Own corner only if no shared value.
+            cake = dict(cake, R_MAX=self.shared_auto_rmax() or rmax_corner_px(
                 fields["BC_y"], fields["BC_z"],
-                fields["NrPixelsY"], fields["NrPixelsZ"])})
-            cake = card.caking()
+                fields["NrPixelsY"], fields["NrPixelsZ"]))
         draw_polar_bin_overlay(
             self._det_view, self._bin_overlay_items,
             bc_y=fields["BC_y"], bc_z=fields["BC_z"],
@@ -1754,6 +1772,61 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._geom_cache[n] = ctx
         self._geom_sig[n] = sig
 
+    # ── run report (read by the control API; also useful in a test) ──
+    def run_report(self) -> dict:
+        """JSON-safe summary of the current/last run: per scan, each panel's
+        status/frames/error and the combine outcome."""
+        import copy
+        return copy.deepcopy(self._report)
+
+    def _report_scan(self) -> dict:
+        """The report entry for the scan being run, created on first use."""
+        key = self._active_out_base or ""
+        for sc in self._report["scans"]:
+            if sc["out_dir"] == key:
+                return sc
+        sc = {"out_dir": key, "panels": {}, "combine": None}
+        self._report["scans"].append(sc)
+        return sc
+
+    def _note_panel(self, n: int, status: str, frames: int = 0, error: str = "") -> None:
+        self._report_scan()["panels"][f"ge{n}"] = {
+            "status": status, "frames": int(frames), "error": error}
+
+    def shared_auto_rmax(self) -> "Optional[float]":
+        """The one radius an *auto* (0) Rmax resolves to, shared by every panel.
+
+        Largest farthest-corner distance over the panels in play. A single
+        shared value is what lets the panels' (R, eta) cakes stack into the
+        merged ge1234 archive: with per-panel auto, each panel integrated to
+        its own corner (3117/3119/3087/3239 px on the connoly_oct26
+        calibration), the R bin counts differed, and ``hydra_zarr_combine``
+        refused every frame ("OmegaSumFrame first-dim differs"). The smaller
+        panels simply have empty bins past their own corner, exactly as with
+        a hand-typed common Rmax. ``None`` when no panel has a usable
+        calibration yet.
+        """
+        want = set(self._loader.siblings() or {}) or set(self._cards)
+        best = None
+        for n, card in sorted(self._cards.items()):
+            if n not in want:
+                continue
+            try:
+                fields, _ = card._calib_fields_in_use()
+            except Exception:
+                continue
+            if not fields or fields.get("BC_y") is None \
+                    or fields.get("NrPixelsY") is None:
+                continue
+            r = float(rmax_corner_px(fields["BC_y"], fields["BC_z"],
+                                     fields["NrPixelsY"], fields["NrPixelsZ"]))
+            best = r if best is None else max(best, r)
+        return best
+
+    def _spec_for(self, n: int):
+        """Panel ``n``'s IntegrationSpec with the shared auto Rmax applied."""
+        return self._cards[n].resolved_spec(auto_r_max=self.shared_auto_rmax())
+
     def _run_all(self):
         scans = self._scan_plan()
         if not scans:
@@ -1779,6 +1852,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         # One queue entry per scan. A single-scan pick makes a queue of one
         # and takes the identical path, which is what keeps every existing
         # run byte-for-byte what it was.
+        self._report = {"scans": [], "cancelled": False, "running": True}
         self._scan_queue = [(panels, out_dir) for out_dir, panels in scans]
         self._scan_total = len(self._scan_queue)
         self._scan_pos = 0
@@ -1924,13 +1998,17 @@ class HydraBatchPage(QtWidgets.QWidget):
                 write_standalone_paramstest(card.result, calib_path)
 
             c = card.caking()
+            shared_rmax = self.shared_auto_rmax()
             a = [sys.executable, "-m", "midas_gui.batch_cli",
                  "--calib-file", str(calib_path),
+                 "--tx", str(hydra.fixed_tx(n)),     # fixed installation azimuth
                  "--r-bin", str(c["R_STEP"]), "--eta-bin", str(c["ETA_STEP"])]
             if c["R_MIN"]:
                 a += ["--r-min", str(c["R_MIN"])]
             if c["R_MAX"]:            # 0.0 is the "auto" sentinel, not a radius
                 a += ["--r-max", str(c["R_MAX"])]
+            elif shared_rmax:         # auto -> ONE value for all panels (combine)
+                a += ["--r-max", str(shared_rmax)]
             # Always sent, unlike R: a panel's wedge is the whole point of
             # Hydra, and an omitted flag means the full circle rather than
             # "unchanged" — ge1's range even straddles the ±180 branch cut.
@@ -2402,16 +2480,15 @@ class HydraBatchPage(QtWidgets.QWidget):
         self._start_panel_worker(n)
 
     def _skip_panel(self, n: int, reason: str):
+        self._note_panel(n, "skipped", error=reason)
         self._log.append(f"[ge{n}] {reason} — skipped")
         self._cards[n].set_status(reason)
-        if self._run_mode() == "sequential":
-            self._start_next_sequential()
-        self._maybe_finish_run()
+        self._advance_after_panel()
 
     def _start_panel_worker(self, n: int):
         card = self._cards[n]
         try:
-            spec = card.resolved_spec()   # this panel's own caking
+            spec = self._spec_for(n)   # this panel's caking, shared auto Rmax
         except Exception as e:
             self._skip_panel(n, f"calibration error: {e}")
             return
@@ -2533,6 +2610,7 @@ class HydraBatchPage(QtWidgets.QWidget):
             return
         count = data["n"]; out = data.get("out_paths", [])
         aborted = data.get("aborted", False)
+        self._note_panel(n, "aborted" if aborted else "done", frames=count)
         self._cards[n].set_status(f"{'Aborted' if aborted else 'Complete'}: {count} frames")
         verb = "aborted after" if aborted else "done —"
         msg = f"[ge{n}] {verb} {count} frames integrated"
@@ -2546,9 +2624,7 @@ class HydraBatchPage(QtWidgets.QWidget):
             }
         self._log_to_project(n, data)
         self._workers.pop(n, None)
-        if self._run_mode() == "sequential":
-            self._start_next_sequential()
-        self._maybe_finish_run()
+        self._advance_after_panel()
 
     def _log_to_project(self, n: int, data: dict):
         if not self._project_ctx or not self._project_ctx.path:
@@ -2575,12 +2651,22 @@ class HydraBatchPage(QtWidgets.QWidget):
     def _on_panel_fail(self, n: int, msg: str):
         if self._run_cancelled:
             return
+        self._note_panel(n, "failed", error=str(msg))
         self._cards[n].set_status("Error")
         self._log.append(f"[ge{n}] ERROR:\n{msg}")
         self._workers.pop(n, None)
+        self._advance_after_panel()
+
+    def _advance_after_panel(self) -> None:
+        """A panel ended (done, failed or skipped): start the next one, or
+        finish the scan. Sequential mode goes through _start_next_sequential,
+        which itself calls _maybe_finish_run when nothing is pending --
+        calling _maybe_finish_run again after it ran the combine and logged
+        "run complete" twice for every sequential run."""
         if self._run_mode() == "sequential":
             self._start_next_sequential()
-        self._maybe_finish_run()
+        else:
+            self._maybe_finish_run()
 
     def _maybe_finish_run(self):
         if self._workers or self._pending_panels or getattr(self, "_launching", False):
@@ -2609,6 +2695,8 @@ class HydraBatchPage(QtWidgets.QWidget):
             self._log.append("Hydra batch integration run complete.")
         self._scan_total = 0
         self._scan_pos = 0
+        self._report["running"] = False
+        self.runFinished.emit(self.run_report())
 
     def _combine_panel_zarrs_if_wanted(self) -> None:
         """Merge each frame's four per-panel zarrs into one, eta-concatenated.
@@ -2645,6 +2733,8 @@ class HydraBatchPage(QtWidgets.QWidget):
             return
         self._log.append(f"[combine] merging {len(sets)} frame(s) across "
                          f"{len(panels)} panels…")
+        comb = self._report_scan()["combine"] = {
+            "total": len(sets), "wrote": 0, "errors": []}
         done = 0
         last_out = None
         # Collected rather than logged per frame: the caking is one setting
@@ -2660,8 +2750,11 @@ class HydraBatchPage(QtWidgets.QWidget):
             except Exception as exc:
                 self._log.append(
                     f"[combine] {Path(group[sorted(group)[0]]).name}: {exc}")
+                if len(comb["errors"]) < 5:
+                    comb["errors"].append(str(exc))
                 continue
             done += 1
+            comb["wrote"] = done
             if done == 1 or done == len(sets):
                 self._log.append(f"[combine]   → {out}")
             last_out = out
@@ -2805,6 +2898,7 @@ class HydraBatchPage(QtWidgets.QWidget):
         if not self._workers:
             return
         self._run_cancelled = True
+        self._report["cancelled"] = True
         for n, w in list(self._workers.items()):
             for sig in (w.progress, w.frame_done, w.finished, w.failed, w.log_line, w.geom_ready):
                 try:
@@ -2833,6 +2927,8 @@ class HydraBatchPage(QtWidgets.QWidget):
                 "[combine] skipped — an aborted scan's panels stop at "
                 "different frames, so there is no complete set to merge. "
                 "Re-run the scan to get its ge1234 archive.")
+        self._report["running"] = False
+        self.runFinished.emit(self.run_report())
 
     def shutdown(self):
         """Interrupt + orphan any still-running per-panel workers on app

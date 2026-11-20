@@ -58,11 +58,15 @@ def test_the_box_shows_the_roll_the_panel_is_actually_placed_at(page):
 
 def test_editing_a_panels_roll_reaches_the_composite(page):
     """The whole point of the card. This changed nothing at all before."""
+    """tx is now FIXED per panel (hydra.HYDRA_PANEL_TX): the box is greyed out
+    and no value written into it, nor a loaded file's tx, reaches the
+    composite. (The live-edit path is covered by the beam-centre/tilt test
+    below.)"""
     card = page._cards["ge1"]
+    assert not card._tx.isEnabled()
     card._tx.setValue(138.0)
-    assert card.get_full_geometry()["tx"] == pytest.approx(138.0)
-    assert page._states[1].tx == pytest.approx(138.0)
-    assert page._composite_img is None, "the canvas must be rebuilt"
+    assert card.get_full_geometry()["tx"] == pytest.approx(300.0)
+    assert page._states[1].tx == pytest.approx(300.0)
 
 
 def test_editing_the_beam_centre_and_tilts_reaches_the_composite(page):

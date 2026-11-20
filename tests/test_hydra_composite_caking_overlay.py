@@ -38,13 +38,14 @@ def _card(eta, *, r_min=440.0, r_max=2200.0, r_step=0.5, e_step=10.0):
         "ETA_MIN": lo, "ETA_MAX": hi, "ETA_STEP": e_step})
 
 
-def _page(rec, cards, *, panels=(1, 2, 3, 4), grid=True):
+def _page(rec, cards, *, panels=(1, 2, 3, 4), grid=True, shared=None):
     """A stand-in exposing only what _draw_composite_caking reads. The real
     _composite_axes_bc is used rather than a stub -- the (rows, cols) vs
     (y, z) order it exists to get right is part of what is under test."""
     return SimpleNamespace(
         _composite_axes_bc=HydraBatchPage._composite_axes_bc,
         _cards=cards, _composite_panels=list(panels),
+        shared_auto_rmax=lambda: shared,
         _grid_chk=SimpleNamespace(isChecked=lambda: grid),
         _det_view=object(), _bin_overlay_items=[],
         _clear_bin_overlay=lambda: rec.append({"cleared": True}))
@@ -118,11 +119,23 @@ def test_a_panel_absent_from_the_canvas_is_not_drawn(calls, img):
     assert len(calls) == 2
 
 
-def test_an_auto_rmax_panel_is_skipped_not_guessed(calls, img):
-    """R_MAX 0 means "resolve from this panel's own corner" -- a per-panel
-    pixel count the composite has no business inventing."""
+def test_an_auto_rmax_panel_is_drawn_at_the_shared_radius(calls, img):
+    """R_MAX 0 = auto = the ONE radius every panel integrates to
+    (``shared_auto_rmax``), so the composite draws it there -- the same number
+    the run will use -- rather than a per-panel guess."""
     cards = {1: _card((120.0, 210.0)), 2: _card((-150.0, -60.0), r_max=0.0)}
-    _draw(_page(calls, cards, panels=(1, 2)), img)
+    _draw(_page(calls, cards, panels=(1, 2), shared=3000.0), img)
+    assert len(calls) == 2
+    step = float(max(1, int(hydra.COMPOSITE_DISPLAY_STEP)))
+    assert calls[1]["r_max"] == 3000.0 / step
+    assert cards[2].caking()["R_MAX"] == 0.0, "drawing must not write into the card"
+
+
+def test_an_auto_rmax_panel_is_skipped_when_no_shared_radius_exists(calls, img):
+    """No panel has a usable calibration yet: nothing to resolve auto against,
+    so nothing is invented."""
+    cards = {1: _card((120.0, 210.0)), 2: _card((-150.0, -60.0), r_max=0.0)}
+    _draw(_page(calls, cards, panels=(1, 2), shared=None), img)
     assert len(calls) == 1 and calls[0]["color"] is not None
 
 

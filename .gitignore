@@ -104,3 +104,8 @@ documentation/pdf_calculation_explained.pdf
 
 # Local scratch work
 scratch/
+
+# Hydra MCP benchmark: generated data/outputs stay local; keep only the generator scripts
+/test_data/hydra_mcp_bench/*
+!/test_data/hydra_mcp_bench/make_bench.py
+!/test_data/hydra_mcp_bench/make_white_flat.py

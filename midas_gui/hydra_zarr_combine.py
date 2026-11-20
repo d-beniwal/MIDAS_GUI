@@ -61,6 +61,9 @@ import numpy as np
 OMEGA_TOL_DEG = 1e-3
 
 
+_RMAX_HINT = (" — the panels were integrated over different R ranges (different "
+              "n_R); re-run every panel with the same Rmin/Rmax/R bin")
+
 def _omega_tolerance(om) -> float:
     """How far two panels' omegas may differ and still be one rotation.
 
@@ -333,7 +336,7 @@ def validate(panels, zs, paths=None):
     for i in range(1, len(zs)):
         s = zs[i]["OmegaSumFrame"][osf_keys[0]].shape
         _check(s[0] == nR_osf, f"OmegaSumFrame first-dim differs: "
-                               f"{p0}={nR_osf}, {panels[i]}={s[0]}")
+                               f"{p0}={nR_osf}, {panels[i]}={s[0]}" + _RMAX_HINT)
 
     # Omegas are compared with a TOLERANCE, not exactly. The four panels
     # are synchronised frames of one rotation, so they describe the same
@@ -387,7 +390,7 @@ def validate(panels, zs, paths=None):
             for i in range(1, len(zs)):
                 si = zs[i][name].shape
                 _check(si[0] == n0, f"{name} first-dim differs: {p0}={n0}, "
-                                    f"{panels[i]}={si[0]}")
+                                    f"{panels[i]}={si[0]}" + _RMAX_HINT)
 
     src = "IntegrationResult" if ir_keys else "OmegaSumFrame"
     key = (ir_keys or osf_keys)[0]

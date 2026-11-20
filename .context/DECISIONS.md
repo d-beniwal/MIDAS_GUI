@@ -3,6 +3,52 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-19 (night) — Hydra ring R offsets between panels are per-panel Lsd, not binning; replotted on 2theta/Q/d
+
+Reported: in the merged R-eta map the CeO2 rings do not sit at the same R on every panel. Checked, no code change: the R grid is identical on all panels (centres 0.5, 1.5 ... step 1.0, 3250 bins); each panel's fitted rings match its OWN calibration (R = Lsd*tan2theta/px) within ~0.4 px; the connoly_oct26 11:48 fits have Lsd 2393.77 / 2395.92 / 2391.41 / 2392.20 mm (0.19% spread), which predicts the observed panel-to-panel R offsets (1.2 px at 111 up to 5.3 px at 620) to 0.27 px rms. K=2 resonance scatter is ~1e-5 of R, far too small. Documented in DOMAIN.md ("Hydra: peak positions agree in 2theta/Q/d, NOT necessarily in R").
+
+Replot with each panel converted by its own Lsd (`test_data/hydra_mcp_bench/out_real/connoly_oct26_merged_tth_Q_d.png`): rings are visually aligned across panels on 2theta, Q and d. Fitted spread across panels (14 CeO2 rings): 2theta 0.0006-0.0067 deg (1e-4 to 6.5e-4 relative), Q 0.0004-0.0047 1/A, same relative size in d; it grows with 2theta, so it is a calibration-consistency residual (tilt/distortion/Lsd-wavelength trade-off), not an axis effect. One d value (ring 600, 1.4e-2) is a fit artefact (600 and 442 share d = 0.9019 A), not a real offset. White_oct26 panels agree on Lsd within 0.26 mm, so the connoly spread is the suspect; cleanest fix is a tied/fixed common Lsd in calibration (not done).
+
+## 2026-11-19 (evening) — Hydra panel tx is FIXED (300/30/120/210) everywhere; never refined
+
+`hydra.HYDRA_PANEL_TX = {1:300, 2:30, 3:120, 4:210}` (+ `fixed_tx`, `pin_tx`) is the single source. Values come from the white_oct26 calibration report (screenshot); the previous bundled defaults were 296.885/27.3/117.8/207.5. Only `tx` changed in `hydra_default_geometry/ps_ge*.txt` (Lsd 3299 mm, BC, ty/tz are still the old example values).
+
+**Pinned at every boundary, whatever a loaded file says (connoly files carry tx=0):** `DetectorState` (new `panel` field) on load; Hydra viewer `DetectorGeometryCard.set_fixed_tx` (box greyed; `set_geometry`, `_load_calibration`, `_export_geom` override); Hydra Calibrate `HydraCalibPanelCard._pin_tx` (seed value fixed, tick forced on and re-forced if a master untick clears it, `manual_seed()` always carries tx, `seed_from_geometry` ignores the file's tx); Batch card `resolved_spec` / `_calib_fields_in_use` / `full_calib_snapshot`; background job passes new `batch_cli --tx`. `HydraCalibrationPage._refine_flags()["tx"]` is now hard False (the tick was already disabled; a restored project could tick it).
+
+**Deliberately not done:** no value-change snap-back on the spin boxes (programmatic `setValue` still works, which existing tests rely on); `batch_cli` run by hand without `--tx` keeps the file's tx; single-detector tabs, Batch Queue/tab_queue not touched; no auto wedge defaults from tx (cards still default to eta -180..180, set wedges explicitly = [tx-180, tx-90]).
+
+**Tests:** new `tests/test_hydra_fixed_tx.py` (13). Updated to the new contract: `test_hydra_calib_panel_clarity` (old "tx unticked" warnings now tested on a non-Hydra card), `test_hydra_calib_ui` (seed is never fully automatic), `test_hydra_panel_geometry_is_live` (tx box is fixed). All hydra/control_api/mcp/calibrate/batch files pass per-file EXCEPT `test_calibrate_mask_overlay` and `test_calibrate_projection`, which also fail on clean HEAD ("bundled demo image should have loaded").
+
+**Real-data run:** connoly_oct26 CeO2 (4 panels x 10 real frames) through `hydra_batch` with its tx=0 calibrations: spec tx came out 300/30/120/210, wedges [tx-180, tx-90], R 0-3250 shared, eta bin 1; all done, merged ge1234 cake 360x3250; every ring is straight and at the same R on all four panels. Image: `test_data/hydra_mcp_bench/out_real/connoly_oct26_merged_R_eta.png`. That dataset's separate dark file is all zeros, so the ~1790-count baseline is not subtracted.
+
+## 2026-11-19 (later still) — Hydra R-eta cake from tx: wedge = [tx-180, tx-90]; ~32 deg of eta is physically uncovered
+
+With the white_oct26 calibration (tx = 300/30/120/210; values transcribed from the report screenshot, no distortion terms, files in `test_data/hydra_mcp_bench/white_calib/`), backend eta = in-plane detector angle + tx (`helpers.py` docstring, measured). Every BC sits just past the detector's far corner, so a panel occupies one wedge: pixel-grid spans ge1 126..207, ge2 -143.5..-61.8, ge3 -53.6..29.1, ge4 38.8..116.6 deg (78-83 deg wide, not 90). Per-panel wedge [tx-180, tx-90] = ge1 [120,210], ge2 [-150,-60], ge3 [-60,30], ge4 [30,120] contains each span and tiles 360 deg with no overlap (ge1 straddles +-180, accepted). Same R range on all panels (Rmin 0, Rmax 3250, 1 px) + eta bin 1.
+
+**Verified through the hydra_batch ops on a flat-field (1000) stack:** merged ge1234 cake is 360 x 3250, contiguous eta -179.5..179.5, every non-empty bin exactly 1000 (no double counting); filled eta bins per ring radius match the pixel-grid prediction (R=666: 240/360, 1086: 289, 2000: 324). 328/360 eta bins have data at some R; the other 32 (about 8-9 deg at each of -150, -60, +30, +120) are real gaps between panels and cannot be filled by any wedge choice. Coverage also depends on R: nothing below ~235-370 px, shrinking beyond ~2200 px (detector edge), so rings at low 2theta see only ~240 of 360 deg.
+
+**Not verified:** real white_oct26 images/rings (only flat field), distortion terms, that these tx values are the final fitted ones (read off a phone screenshot), eta-bin sizes other than 1 deg. Wedge helper not yet built into the GUI; set via `hydra_batch_set_caking(eta_min, eta_max, panels=[...])`.
+
+## 2026-11-19 (later) — `hydra_batch.*` control/MCP ops + shared auto Rmax (fixes the combine failure)
+
+**Added** `hydra_batch.{get_state,set_scans,set_calibration,set_caking,set_options,run,run_queue,get_job,wait,abort}` (`control_api._HydraBatchOps`, `control_server` async `wait`, MCP tools in `midas_gui_mcp/server.py`, skill `midas-gui-mcp-hydra-batch`). They drive `HydraBatchPage` through its own widgets and `_run_all`, with a preflight that returns `precondition_failed` instead of the page's `QMessageBox`es. The page gained `runFinished(dict)` + `run_report()` (per scan/panel status, frames, errors, combine outcome). `run_queue` exists because the page holds ONE calibration per panel for a multi-scan run, so datasets with different calibrations must run as separate jobs.
+
+**Fix (product bug):** auto Rmax (0) now resolves to ONE value shared by all panels (`HydraBatchPage.shared_auto_rmax` = max corner distance), used by `_start_panel_worker`, the background-job argv and both overlays. Before, each panel got its own corner (and the per-panel preview even wrote that number into the card), so n_R differed and `hydra_zarr_combine` rejected every frame. An explicit Rmax on a card still wins. Deliberately NOT written back into cards (a write-back would freeze a panel at a stale radius). The combine error now says the panels used different R ranges.
+
+**Also fixed (pre-existing):** sequential Hydra runs finished twice (`_on_panel_done` called `_start_next_sequential`, which already calls `_maybe_finish_run`, then called it again), so the combine ran and "run complete" logged twice. Now `_advance_after_panel`.
+
+**Tests:** `tests/test_control_api_hydra_batch_ops.py` (5; real MainWindow, modal dialogs fail the test); `test_hydra_composite_caking_overlay.py` updated from "auto panel is skipped" to "drawn at the shared radius". All hydra/control_api/mcp/batch test files pass per-file. **Live (offscreen, real socket, bench):** 3 scans x 4 panels x 20 frames, 2 calibration sets, via one `run_queue`: 44.7 s, all done, 3 merged ge1234 archives.
+
+**Not done:** real MCP transport (the `mcp` package is not in the GUI env; `server.py` only syntax-checked); per-panel eta wedges and Q/2theta bins untested through the ops; real 1-ID-E data; `batch_cli` run directly still auto-resolves Rmax per panel (the GUI job path now passes the shared value).
+
+## 2026-11-19 — Hydra via MCP: benchmark built; MCP has NO Hydra/Batch ops; auto-R combine failure found
+
+Built `test_data/hydra_mcp_bench/` (gitignored except `make_bench.py`): 3 scans x 4 panels x 20 frames (10 real connoly_oct26 CeO2 frames cycled; B/C get seeded Poisson noise), `calib_set1` (real Oct-8 11:48 calibration) and `calib_set2` (per-panel perturbed Lsd/BC/ty/tz). Scan A,B -> set1; C -> set2. 2 GB.
+
+**Findings.** (1) `midas-gui` MCP server is not registered in this client (`claude mcp list`); drove the GUI via `midas_gui_mcp/client.py` instead. (2) `control_api.py` has data_viewer/calibrate/solve_cell/project ops only: `hydra.*` and `batch.*` return `unknown_op`. So an agent can drive Hydra panels one at a time through Data Viewer (12/12 scan x panel loads + calibration loads + radial profiles OK, ~1.3 s each, correct set applied) but cannot run Hydra or Batch Integrate. (3) Headless backend (`batch_cli` per panel + `hydra_combine_cli`) works for 3 scans in parallel (12/12 exit 0, 79 s) BUT `hydra_combine_cli` fails on every frame with "OmegaSumFrame first-dim differs: ge1=3108, ge2=3110" when R max is left auto: auto R max is per-panel (`rmax_corner_px` = 3117/3119/3087/3239 px for set 1), so n_R differs. Same run with `--r-min 0 --r-max 3240` merged all 20 frames. The GUI's `HydraBatchPage` also resolves auto R max per panel (lines ~1560, 1933), so the in-GUI path very likely hits the same failure; NOT verified in the GUI (no op to drive it).
+
+**Not tested:** the actual Hydra GUI pages, per-panel eta wedges (CLI runs used full-circle eta), MCP transport itself. **Next:** add `hydra_batch.*` ops (set scan/calib per panel, shared R range, run, poll) + make auto R max shared across panels in Hydra; then re-run this bench through MCP.
+
 ## 2026-11-15 — Test-suite audit: stale tests fixed, crash source removed, pytest-forked NOT enabled
 
 Per-file run of all 187 files: **3383 passed, 10 skipped, 0 failed**. Before: 11 failing files. Root causes (none were product bugs):

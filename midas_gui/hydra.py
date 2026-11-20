@@ -11,8 +11,8 @@ than a bespoke per-panel-file parser.
 
 Default geometry (BC, Lsd, tx/ty/tz, px) is bundled under
 ``hydra_default_geometry/`` — a generic 1-ID-E-style example windmill layout
-(the tx tilts are ~90° apart, a real fitted geometry, not idealized round
-numbers), used only until a real per-panel calibration file is loaded.
+(a real fitted geometry), used only until a real per-panel calibration file is
+loaded. Its tx values are the fixed ones below.
 """
 from __future__ import annotations
 
@@ -50,6 +50,37 @@ _GEOMETRY_DIR = Path(__file__).parent / "hydra_default_geometry"
 #: pixel size, beam centre and NrPixels to match, in
 #: _reseed_composite_card_if_needed. Set to 1 for a full-resolution canvas.
 COMPOSITE_DISPLAY_STEP = 2
+
+
+#: Installation azimuth of each Hydra panel about the beam, in degrees.
+#: Fixed by how the four GE panels are mounted (90 deg apart), not fitted: a
+#: powder pattern is unchanged by rotating a panel about the beam, so no
+#: calibrant can determine it and it is never refined. Every Hydra path pins
+#: it to these values -- default geometry, Calibrate seeds, the viewer cards,
+#: loaded calibration files and Batch Integrate -- whatever a loaded file
+#: says. With eta = in-plane angle + tx, panel n's wedge is
+#: [tx - 180, tx - 90] deg.
+HYDRA_PANEL_TX = {1: 300.0, 2: 30.0, 3: 120.0, 4: 210.0}
+
+
+def fixed_tx(panel) -> Optional[float]:
+    """The fixed tx of Hydra panel ``panel`` (1-4), or None for anything else."""
+    try:
+        return HYDRA_PANEL_TX.get(int(panel))
+    except (TypeError, ValueError):
+        return None
+
+
+def pin_tx(fields, panel):
+    """Copy of a geometry dict with tx forced to the panel's fixed value.
+    Returned unchanged (not copied) when ``panel`` is not a Hydra panel or
+    ``fields`` is empty."""
+    tx = fixed_tx(panel)
+    if tx is None or not fields:
+        return fields
+    out = dict(fields)
+    out["tx"] = tx
+    return out
 
 
 def default_param_file(panel: int) -> Path:
@@ -305,6 +336,9 @@ class DetectorState:
     tx: float = 0.0
     ty: float = 0.0
     tz: float = 0.0
+    #: Which Hydra panel (1-4) this is; 0 = unknown. Lets load_from_geometry_dict
+    #: pin tx to the panel's fixed value (see HYDRA_PANEL_TX).
+    panel: int = 0
     lsd: float = 0.0
     px: float = 200.0
     ny: int = 2048
@@ -319,6 +353,7 @@ class DetectorState:
     _inv_cache_key: tuple = ()
 
     def load_from_geometry_dict(self, fields: dict, calib_path: str = "") -> None:
+        fields = pin_tx(fields, self.panel)
         self.calib_path = calib_path
         if fields.get("BC_y") is not None: self.bc_y = float(fields["BC_y"])
         if fields.get("BC_z") is not None: self.bc_z = float(fields["BC_z"])
@@ -334,6 +369,7 @@ class DetectorState:
         self._inv_cache_key = ()
 
     def load_default(self, panel: int) -> None:
+        self.panel = int(panel)
         self.load_from_geometry_dict(geometry_fields_from_file(str(default_param_file(panel))))
 
     def get_inv_coords(self, big_det_size: int, step: int = 1) -> tuple:

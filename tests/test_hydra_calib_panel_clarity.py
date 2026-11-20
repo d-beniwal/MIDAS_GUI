@@ -63,19 +63,53 @@ def test_an_untypable_angle_is_no_longer_untypable(card):
         assert f"{tx:g}" in card._seed_summary_lbl.text()
 
 
-def test_a_tx_that_is_set_but_not_ticked_is_called_out(card):
+@pytest.fixture
+def unpinned_card(app):
+    """Panel number 0 is not a Hydra panel, so tx is an ordinary seed input
+    (the warnings below only exist for that case: Hydra panels 1-4 have a
+    fixed tx that is always in the seed)."""
+    from midas_gui.hydra_calib_widgets import HydraCalibPanelCard
+    return HydraCalibPanelCard(0)
+
+
+def test_a_tx_that_is_set_but_not_ticked_is_called_out(unpinned_card):
     """The quietest way to get a wrong answer: type the angle, forget the
     tick, and the fit silently uses 0."""
+    card = unpinned_card
     card._seed_tx.setValue(296.885)
     card._seed_en_tx.setChecked(False)
     assert card.seed_tx_value() == 0.0
     assert "NOT ticked" in card._seed_summary_lbl.text()
 
 
-def test_tx_unset_says_so(card):
+def test_tx_unset_says_so(unpinned_card):
+    card = unpinned_card
     card._seed_en_tx.setChecked(False)
     card._seed_tx.setValue(0.0)
     assert "not set" in card._seed_summary_lbl.text().lower()
+
+
+# ── Hydra panels: tx is fixed (hydra.HYDRA_PANEL_TX) ───────────────────
+
+@pytest.mark.parametrize("n,tx", [(1, 300.0), (2, 30.0), (3, 120.0), (4, 210.0)])
+def test_a_hydra_panels_tx_is_fixed_in_the_seed(app, n, tx):
+    from midas_gui.hydra_calib_widgets import HydraCalibPanelCard
+    card = HydraCalibPanelCard(n)
+    assert card._seed_tx.value() == pytest.approx(tx)
+    assert card._seed_en_tx.isChecked()
+    assert not card._seed_tx.isEnabled() and not card._seed_en_tx.isEnabled()
+    assert card.manual_seed()["tx"] == pytest.approx(tx)
+    assert card.seed_tx_value() == pytest.approx(tx)
+
+
+def test_the_fixed_tx_survives_unticking_everything_and_a_loaded_file(card):
+    for cb in card._seed_enables:
+        cb.setChecked(False)
+    assert card._seed_en_tx.isChecked(), "the master untick must not drop tx"
+    assert card.manual_seed() == {"tx": 300.0}
+    card.seed_from_geometry({"tx": 12.0, "ty": 0.1})   # a file with another tx
+    assert card._seed_tx.value() == pytest.approx(300.0)
+    assert card.manual_seed()["tx"] == pytest.approx(300.0)
 
 
 def test_the_effective_tx_is_what_the_fit_will_use(card):

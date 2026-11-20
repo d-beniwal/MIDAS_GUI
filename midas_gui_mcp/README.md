@@ -1,4 +1,4 @@
-# midas-gui MCP server (Data Viewer + Calibrate + Solve Cell)
+# midas-gui MCP server (Data Viewer + Calibrate + Solve Cell + Hydra Batch Integrate)
 
 Lets an LLM agent — this one, or any other framework that speaks MCP —
 drive the live midas-gui application instead of a human clicking through
@@ -55,6 +55,8 @@ advertises them in its MCP `instructions` field.
 - `skills/midas-gui-mcp-calibrate/` — calibration recipe and gotchas (seeds,
   wavelength/pixel size, polling, abort).
 - `skills/midas-gui-mcp-project/` — saving and opening project `.h5` files.
+- `skills/midas-gui-mcp-hydra-batch/` — four-panel Hydra integration (`hydra_batch_*`): scans, calibration
+  sets, caking/options, run, queue of datasets with their own calibrations, shared auto Rmax.
 - `skills/midas-gui-mcp-solve-cell/` — the whole Solve Cell sequence: inputs → suggest/apply
   parameters → ingest → material filter → index/refine → domain loop.
 
@@ -284,8 +286,9 @@ docstring restates what it does.
 
 ## Known limitations (phase 1)
 
-- **Scope**: Data Viewer, Calibrate and Solve Cell. Mask generation and Batch
-  (radial) Integrate are a later phase. Solve Cell does not yet expose
+- **Scope**: Data Viewer, Calibrate, Solve Cell and Hydra Batch Integrate (`hydra_batch.*`:
+  get_state, set_scans, set_calibration, set_caking, set_options, run, run_queue, get_job,
+  wait, abort). Mask generation and single-detector Batch (radial) Integrate are a later phase. Solve Cell does not yet expose
   opening a project (`File ▸ Open Project` is dialog-driven) or the
   interactive 3-D camera / per-view widgets of the Diagnostics, Contamination
   and Inspector tabs beyond `set_view`; `solve_cell.save_project` is the one

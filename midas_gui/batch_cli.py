@@ -42,6 +42,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         description="Run one Batch Integrate job with no GUI.")
     p.add_argument("--calib-file", required=True,
                    help="Calibration source: paramstest.txt / calibration.json / .poni")
+    p.add_argument("--tx", type=float, default=None,
+                   help="Override the calibration's tx (deg). Hydra panels pass "
+                        "their fixed installation azimuth here (see "
+                        "hydra.HYDRA_PANEL_TX); unset keeps the file's tx.")
     p.add_argument("--r-bin", type=float, default=1.0, help="R bin size (px)")
     p.add_argument("--eta-bin", type=float, default=5.0, help="eta bin size (deg)")
     p.add_argument("--r-min", type=float, default=None, help="Rmin (px); default backend auto")
@@ -325,6 +329,11 @@ def main(argv=None) -> int:
     # pattern full_calibration_snapshot already supports (it builds a
     # duck-typed result via helpers.result_ns_from_geometry_file itself).
     calib_snapshot, _calib_note = full_calibration_snapshot(None, True, args.calib_file)
+    if args.tx is not None:
+        import torch
+        spec.tx = torch.as_tensor(float(args.tx), dtype=spec.tx.dtype, device=spec.tx.device)
+        if calib_snapshot:
+            calib_snapshot = dict(calib_snapshot, tx=float(args.tx))
     src_cfg = _source_cfg(args)
     mask = _load_field(args.mask)
     if mask is not None:

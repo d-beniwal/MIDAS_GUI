@@ -195,6 +195,8 @@ class HydraViewerPage(QtWidgets.QWidget):
             card = DetectorGeometryCard(show_rotate=(key != "composite"),
                                         show_calib_handoff=False)
             card.set_image_source(self._make_image_provider(key), None)
+            if key != "composite":
+                card.set_fixed_tx(hydra.fixed_tx(int(key[2:])))
             # Four panels plus a composite all saving "paramstest.txt" into
             # the launch directory is four chances to overwrite the wrong
             # one, so each proposes a name carrying which panel it is.
@@ -624,6 +626,7 @@ class HydraViewerPage(QtWidgets.QWidget):
         if fields is None:
             return
         st = self._states.setdefault(n, hydra.DetectorState())
+        st.panel = n
         st.load_from_geometry_dict(fields)
         self._composite_img = None
         if self._toolbar.current() in ("composite", f"ge{n}"):

@@ -1445,7 +1445,10 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         return {
             "Lsd": self._ref_lsd.isChecked(), "BC": self._ref_bc.isChecked(),
             "ty": self._ref_ty.isChecked(), "tz": self._ref_tz.isChecked(),
-            "tx": self._ref_tx.isChecked(), "Wavelength": self._ref_wl.isChecked(),
+            # Never refined: tx is each panel's fixed installation azimuth
+            # (hydra.HYDRA_PANEL_TX). Not read from the box, which a restored
+            # project could have ticked.
+            "tx": False, "Wavelength": self._ref_wl.isChecked(),
             "Distortion": self._ref_dist.isChecked(), "distortion_coeffs": coeffs,
         }
 

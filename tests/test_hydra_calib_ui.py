@@ -225,8 +225,12 @@ def test_hydra_calib_page_wiring_and_pick_isolation(app, fixture_available, tmp_
     card1 = page._cards[1]
     for cb in card1._seed_enables:
         cb.setChecked(False)
-    assert "automatic" in page._seed_status_lbl.text().lower()
+    # tx is a fixed per-panel input (hydra.HYDRA_PANEL_TX): it re-ticks itself,
+    # so the seed is never "fully automatic" on a Hydra panel.
+    assert card1._seed_en_tx.isChecked()
+    assert page._seed_status_lbl.text().split(":")[-1].strip() == "tx"
     stale_tx = card1._seed_tx.value()
+    assert stale_tx == pytest.approx(300.0)
     fake_result = SimpleNamespace(
         Lsd=3_227_008.5, BC_y=2265.66, BC_z=2080.73,
         tx=180.0, ty=-5.2542, tz=24.4086, distortion={},
@@ -234,8 +238,8 @@ def test_hydra_calib_page_wiring_and_pick_isolation(app, fixture_available, tmp_
         NrPixelsY=2048, NrPixelsZ=2048)
     refine = {"Lsd": True, "BC": True, "ty": True, "tz": True, "tx": False}
     card1.on_result(fake_result, refine=refine)
-    assert card1._seed_en_tx.isChecked() is False
-    assert card1._seed_tx.value() == pytest.approx(stale_tx)
+    assert card1._seed_en_tx.isChecked()           # fixed, always seeded
+    assert card1._seed_tx.value() == pytest.approx(stale_tx)   # NOT the result's 180
     assert card1._seed_en_lsd.isChecked() and card1._seed_en_bc.isChecked()
     assert card1._seed_lsd.value() == pytest.approx(3227.0085, rel=1e-6)
 
@@ -243,16 +247,15 @@ def test_hydra_calib_page_wiring_and_pick_isolation(app, fixture_available, tmp_
     # without anyone opening the Manual seed… dialog.
     text = page._seed_status_lbl.text()
     tokens = [t.strip() for t in text.split(":")[-1].split(",")]
-    assert {"BC", "Lsd", "ty", "tz"} <= set(tokens)
-    assert "tx" not in tokens
+    assert {"BC", "Lsd", "ty", "tz", "tx"} <= set(tokens)
 
     # A stored/replayed result (display_stored_result's call shape — no
     # `refine`) must never promote anything, even with feedback checked.
     for cb in card1._seed_enables:
         cb.setChecked(False)
     card1.on_result(fake_result)
-    assert not any(cb.isChecked() for cb in card1._seed_enables)
-    assert "automatic" in page._seed_status_lbl.text().lower()
+    assert [cb.isChecked() for cb in card1._seed_enables] == [False, False, True, False, False]
+    assert page._seed_status_lbl.text().split(":")[-1].strip() == "tx"
 
     # Radially-adaptive threshold: toggling enables the curve editor, and
     # _calib_image_for uses the CALLED panel's own BC, not a shared one.

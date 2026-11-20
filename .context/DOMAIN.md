@@ -174,6 +174,12 @@ Best options (all via `hdf5plugin`; native gzip/lzf also tested but dominated):
   not committed to repo (was an ad hoc exploratory analysis, not a code
   change).
 
+## Hydra: peak positions agree in 2theta/Q/d, NOT necessarily in R (px)
+
+Each Hydra panel is calibrated separately, so each has its own Lsd (connoly_oct26 11:48 fits: 2393.77 / 2395.92 / 2391.41 / 2392.20 mm, a 0.19% spread). The cake R axis is in detector pixels, R = Lsd*tan(2theta)/px, so the SAME ring lands at a slightly different R on each panel, and the offset grows with R (measured 1.2 px at CeO2 111 up to 5.3 px at 620; predicted from the Lsd values alone to 0.27 px rms). This is not a binning problem: the R bin grid is identical on every panel (centres 0.5, 1.5, ... step 1.0). In the merged ge1234 archive, which shares one R grid, expect straight-but-slightly-offset rings between panels.
+
+What must agree: peak positions on the 2theta, Q and d axes, once each panel's R is converted with ITS OWN Lsd (2theta = atan(R*px/Lsd); Q = 4*pi*sin(theta)/lambda; d = lambda/(2*sin(theta))). Any residual there means a calibration problem (tilt, distortion, wavelength, BC), not an axis problem. A spread of Lsd this large between panels is itself suspect: white_oct26's four panels agree within 0.26 mm. Cleanest fix is a tied/fixed common Lsd in calibration. See DECISIONS 2026-11-19 (R offsets) and the merged-view note in `hydra_zarr_combine` / `_merged_axis_context` (stays in px because one conversion cannot serve panels at different distances).
+
 ## Terminology quick-ref
 
 Q — scattering vector (Å⁻¹). 2θ — diffraction angle. η — azimuthal angle.

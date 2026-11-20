@@ -635,11 +635,45 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         self._refresh_profile_markers()
         self._maybe_auto_radial()
 
+    #: Fixed tx (deg) when this card is a Hydra panel's, else None. See
+    #: ``hydra.HYDRA_PANEL_TX`` and :meth:`set_fixed_tx`.
+    _fixed_tx: Optional[float] = None
+
+    def set_fixed_tx(self, value) -> None:
+        """Pin tx to a Hydra panel's fixed installation azimuth.
+
+        tx is mounting geometry, not a fitted value, so the box shows it
+        greyed out and every load/export path below overrides whatever a
+        loaded calibration file says. ``None`` releases the pin.
+        """
+        self._fixed_tx = None if value is None else float(value)
+        if self._fixed_tx is None:
+            self._tx.setEnabled(True)
+            return
+        self._tx.blockSignals(True)
+        self._tx.setValue(self._fixed_tx)
+        self._tx.blockSignals(False)
+        self._tx.setEnabled(False)
+        self._tx.setToolTip(
+            f"Fixed at {self._fixed_tx:g}° — this panel's installation azimuth "
+            "about the beam. It is set by how the Hydra panels are mounted, "
+            "is not refined, and overrides the tx in any calibration file.")
+        if self._calib_geom is not None:
+            self._calib_geom["tx"] = self._fixed_tx
+            self._snapshot_calib_baseline()
+
+    def _pin_tx(self, d):
+        """``d`` (a geometry dict) with tx forced to the fixed value, if any."""
+        if self._fixed_tx is None or not d:
+            return d
+        return dict(d, tx=self._fixed_tx)
+
     def set_geometry(self, g: dict):
         """Replace the manual-geometry fields from a geometry dict (e.g. the Calibrate
         tab's result). Values are µm/Å/px; the Lsd field displays mm."""
         if not g:
             return
+        g = self._pin_tx(g)
         for w, key, scale in ((self._wl, "wavelength_A", 1.0), (self._px, "pxY", 1.0),
                               (self._lsd, "Lsd", 0.001), (self._bcy, "BC_y", 1.0),
                               (self._bcz, "BC_z", 1.0), (self._tx, "tx", 1.0),
@@ -2081,7 +2115,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         if px is not None: parts.append(f"px={float(px):.4g} µm")
         self._calib_ctx_cache.clear()
         try:
-            self._calib_geom = geometry_fields_from_file(path)
+            self._calib_geom = self._pin_tx(geometry_fields_from_file(path))
             d = self._calib_geom
             for w, key in ((self._tx, "tx"), (self._ty, "ty"), (self._tz, "tz")):
                 v = d.get(key)
@@ -2169,8 +2203,8 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         counts = self._raw_pixel_counts(img)
         if base is None:
             ny, nz = counts
-            return {**live, "pxZ": px, "NrPixelsY": ny, "NrPixelsZ": nz,
-                    "distortion": {}}
+            return self._pin_tx({**live, "pxZ": px, "NrPixelsY": ny, "NrPixelsZ": nz,
+                                 "distortion": {}})
         # Override only the fields the user has actually MOVED since the
         # calibration was loaded, compared against what the load itself wrote
         # into each box -- not against the file's value. The boxes are
@@ -2200,7 +2234,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         # the file can only be stale about it.
         if counts is not None and (geom.get("NrPixelsY"), geom.get("NrPixelsZ")) != counts:
             geom["NrPixelsY"], geom["NrPixelsZ"] = counts
-        return geom
+        return self._pin_tx(geom)
 
     def _snapshot_calib_baseline(self) -> None:
         """Remember what a calibration load just put into each geometry box,

@@ -67,6 +67,41 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         self._ring_items: list = []
         self._show_rings = True
         self._build_ui()
+        self._pin_tx()
+
+    # ── Fixed tx ─────────────────────────────────────────────────
+
+    def _pin_tx(self) -> None:
+        """Hold this panel's tx at its fixed installation azimuth.
+
+        tx is mounting geometry (``hydra.HYDRA_PANEL_TX``), not a fitted
+        value, so the seed always carries it: value pinned, tick forced on and
+        both greyed out. Re-called after anything that can rewrite them (a
+        loaded file, a restored project, the page's "use manual seed" master).
+        """
+        from midas_gui import hydra
+        tx = hydra.fixed_tx(self.panel_number)
+        if tx is None:
+            return
+        self._tx_pinned = True
+        self._seed_tx.blockSignals(True)
+        self._seed_tx.setValue(tx)
+        self._seed_tx.blockSignals(False)
+        if not self._seed_en_tx.isChecked():
+            self._seed_en_tx.setChecked(True)
+        note = (f"Fixed at {tx:g}° — this panel's installation azimuth about the "
+                "beam. Set by how the Hydra panels are mounted, never refined, and "
+                "it overrides the tx in any calibration file you load.")
+        for w in (self._seed_tx, self._seed_en_tx):
+            w.setEnabled(False)
+            w.setToolTip(note)
+        if not getattr(self, "_tx_guard_connected", False):
+            # A master "use manual seed" untick, or a restored project, can
+            # clear the tick; the pinned tx must stay in the seed.
+            self._seed_en_tx.toggled.connect(
+                lambda on: None if on else self._pin_tx())
+            self._tx_guard_connected = True
+        self._update_seed_summary()
 
     # ── Wiring ───────────────────────────────────────────────────
 
@@ -281,7 +316,7 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         for en, key, w in ((self._seed_en_tx, "tx", self._seed_tx),
                            (self._seed_en_ty, "ty", self._seed_ty),
                            (self._seed_en_tz, "tz", self._seed_tz)):
-            if en.isChecked():
+            if en.isChecked() or (key == "tx" and getattr(self, "_tx_pinned", False)):
                 manual[key] = w.value()
         return manual or None
 
@@ -312,6 +347,9 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         for cb, widgets in self._seed_gated:
             on = cb.isChecked()
             for w in widgets:
+                if getattr(self, "_tx_pinned", False) and w is self._seed_tx:
+                    w.setEnabled(False)
+                    continue
                 w.setEnabled(on)
 
     def _on_seed_master_toggled(self, *_args):
@@ -344,7 +382,9 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
               if cb.isChecked()]
         head = ("Seeding: " + "  ·  ".join(on) if on
                 else "Fully automatic (no manual seed)")
-        if self._seed_en_tx.isChecked():
+        if getattr(self, "_tx_pinned", False):
+            tx_note = "tx is fixed for this panel (installation azimuth, never refined)."
+        elif self._seed_en_tx.isChecked():
             tx_note = "tx is held at this value (never refined)."
         elif abs(self._seed_tx.value()) > 1e-9:
             tx_note = (f"tx {self._seed_tx.value():g}° is NOT ticked, so the fit "
@@ -360,6 +400,8 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
     def seed_tx_value(self) -> float:
         """The tx this panel's fit will actually use: the seeded angle, or
         0.0 when tx is not ticked. Read by the page's panel overview."""
+        if getattr(self, "_tx_pinned", False):
+            return self._seed_tx.value()
         return self._seed_tx.value() if self._seed_en_tx.isChecked() else 0.0
 
     def _enable_seed(self, **flags):
@@ -384,7 +426,7 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         if g.get("Lsd"):
             self._seed_lsd.setValue(float(g["Lsd"]) / 1000.0)
             self._enable_seed(Lsd=True)
-        if g.get("tx") is not None:
+        if g.get("tx") is not None and not getattr(self, "_tx_pinned", False):
             self._seed_tx.setValue(float(g["tx"]))
             self._enable_seed(tx=True)
         if g.get("ty") is not None:
@@ -697,3 +739,4 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             self._enable_seed(BC=True, Lsd=True, tx=True, ty=True, tz=True)
         else:
             self._on_seed_enable_changed()
+        self._pin_tx()

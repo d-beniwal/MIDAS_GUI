@@ -1063,7 +1063,418 @@ class _ProjectOps:
                     "selection": {k: bool(v) for k, v in sel.items()}})
 
 
-class GuiController(_SolveCellOps, _ProjectOps):
+# ── Hydra Batch Integrate ────────────────────────────────────────────
+# Drives the Batch Integrate tab's Hydra page (``HydraBatchPage``) through its
+# own widgets and ``_run_all``, so an agent run and a click run are the same
+# code. Settings persist in the page between calls (like every other tab);
+# ``run_queue`` is for several datasets that each need their own calibration
+# set, because the page itself holds one calibration per panel for a whole
+# multi-scan run.
+
+_HB_PANELS = (1, 2, 3, 4)
+_HB_CAKE_KEYS = {"r_min": "R_MIN", "r_max": "R_MAX", "r_bin": "R_STEP",
+                 "eta_min": "ETA_MIN", "eta_max": "ETA_MAX", "eta_bin": "ETA_STEP"}
+
+
+def _hb_panel_list(panels) -> list:
+    """``None`` -> all four; else ints from ``[1,2]`` / ``["ge1","ge2"]``."""
+    if panels is None:
+        return list(_HB_PANELS)
+    out = []
+    for p in panels:
+        n = int(str(p).lower().replace("ge", ""))
+        if n not in _HB_PANELS:
+            raise ValueError(f"unknown panel {p!r} (ge1..ge4)")
+        out.append(n)
+    return out
+
+
+class _HydraBatchOps:
+    @property
+    def _hb_tab(self):
+        return self._win._batch_tab
+
+    def _hb_page(self):
+        """The Hydra page, with the tab switched into Hydra mode (built lazily)."""
+        tab = self._hb_tab
+        page = tab._ensure_hydra_page()
+        tab._mode_ribbon.set_mode("hydra")
+        return page
+
+    # ── applying settings (shared by the ops and run_queue) ─────────
+    def _hb_apply_scans(self, page, paths, output_dir=None, dark=None) -> list:
+        from midas_gui import hydra
+        if not paths:
+            raise ValueError("paths must be a non-empty list of ge1..ge4 panel files "
+                             "(any one panel per scan; siblings are found automatically)")
+        bad = [str(q) for q in paths if not Path(q).is_file()]
+        if bad:
+            raise ValueError(f"file(s) not found: {bad[:3]}")
+        notpanel = [str(q) for q in paths if hydra.panel_for_file(q) is None]
+        if notpanel:
+            raise ValueError(f"no ge1..ge4 token in path, cannot place on a panel: {notpanel[:3]}")
+        page._loader.set_selection([str(q) for q in paths])
+        if output_dir is not None:
+            page._out_ed.setText(str(output_dir))
+        if dark is not None:
+            sel = page._loader._dark_sel
+            if dark == "" or dark is False:
+                sel.set_state({"checked": False})
+            else:
+                if not Path(dark).is_file():
+                    raise ValueError(f"dark file not found: {dark}")
+                sel.set_state({"checked": True, "path": str(dark),
+                               "dataset": "exchange/data"})
+        return self._hb_plan(page)
+
+    def _hb_apply_calibration(self, page, files=None, from_file=None) -> dict:
+        from midas_gui import hydra
+        if (files is None) == (from_file is None):
+            raise ValueError("give exactly one of files={'ge1': path, ...} or from_file=<one panel's file>")
+        if from_file is not None:
+            picked = hydra.panel_for_file(from_file)
+            if picked is None:
+                raise ValueError(f"{from_file}: no ge1..ge4 token to derive the other panels from")
+            files = {}
+            for n in _HB_PANELS:
+                cand = from_file if n == picked else hydra.sibling_for_panel(from_file, n)
+                if cand and Path(cand).exists():
+                    files[f"ge{n}"] = cand
+        out = {}
+        for key, path in files.items():
+            n = _hb_panel_list([key])[0]
+            if not Path(path).is_file():
+                raise ValueError(f"ge{n}: calibration file not found: {path}")
+            page._cards[n].set_calibration_file(str(path))
+            out[f"ge{n}"] = str(path)
+        return out
+
+    def _hb_apply_caking(self, page, caking: dict, panels=None) -> dict:
+        bad = sorted(set(caking) - set(_HB_CAKE_KEYS))
+        if bad:
+            raise ValueError(f"unknown caking key(s) {bad} (allowed: {sorted(_HB_CAKE_KEYS)})")
+        vals = {_HB_CAKE_KEYS[k]: float(v) for k, v in caking.items() if v is not None}
+        for n in _hb_panel_list(panels):
+            page._cards[n].set_caking(vals)
+        return {f"ge{n}": page._cards[n].caking() for n in sorted(page._cards)}
+
+    def _hb_apply_options(self, page, o: dict) -> dict:
+        o = dict(o)
+        if "kernel" in o:
+            i = page._kernel.findData(o.pop("kernel"))
+            if i < 0:
+                raise ValueError("kernel must be one of "
+                                 f"{[page._kernel.itemData(j) for j in range(page._kernel.count())]}")
+            page._kernel.setCurrentIndex(i)
+        if "formats" in o:
+            want = set(o.pop("formats"))
+            checks = page._fmt._checks
+            unknown = sorted(want - set(checks))
+            if unknown:
+                raise ValueError(f"unknown output format(s) {unknown} (one of {sorted(checks)})")
+            for k, cb in checks.items():
+                cb.setChecked(k in want)
+        for key, combo in (("run_mode", page._run_mode_combo),
+                           ("frame_run_mode", page._frame_run_mode),
+                           ("zarr_grouping", page._zarr_grouping)):
+            if key in o:
+                i = combo.findData(o.pop(key))
+                if i < 0:
+                    raise ValueError(f"unknown {key}; one of "
+                                     f"{[combo.itemData(j) for j in range(combo.count())]}")
+                combo.setCurrentIndex(i)
+        if "combine_zarr" in o:
+            page._combine_zarr_chk.setChecked(bool(o.pop("combine_zarr")))
+        if "n_workers" in o:
+            page._n_workers.setValue(int(o.pop("n_workers")))
+        ld = page._loader
+        for key, spin in (("frame_start", "_fr_start"), ("frame_end", "_fr_end"),
+                          ("frame_stride", "_fr_stride")):
+            if key in o:
+                w = getattr(ld, spin)
+                v = int(o.pop(key))
+                w.setMaximum(max(w.maximum(), v))
+                w.setValue(v)
+        if o:
+            raise ValueError(f"unknown option(s) {sorted(o)} (allowed: kernel, formats, run_mode, "
+                             "frame_run_mode, zarr_grouping, combine_zarr, n_workers, "
+                             "frame_start, frame_end, frame_stride)")
+        return self._hb_options(page)
+
+    # ── reading state ───────────────────────────────────────────────
+    def _hb_plan(self, page) -> list:
+        return [{"out_dir": out, "panels": {f"ge{n}": [str(x) for x in ps]
+                                            for n, ps in sorted(panels.items())}}
+                for out, panels in page._scan_plan()]
+
+    def _hb_options(self, page) -> dict:
+        ld = page._loader
+        return {"kernel": page._kernel.currentData(),
+                "formats": list(page._fmt.checked_keys()),
+                "run_mode": page._run_mode_combo.currentData(),
+                "frame_run_mode": page._frame_run_mode.currentData(),
+                "zarr_grouping": page._zarr_grouping.currentData(),
+                "combine_zarr": page._combine_zarr_chk.isChecked(),
+                "n_workers": page._n_workers.value(),
+                "frame_start": ld._fr_start.value(), "frame_end": ld._fr_end.value(),
+                "frame_stride": ld._fr_stride.value(),
+                "output_dir": page._out_ed.text().strip()}
+
+    def _hb_panels_state(self, page) -> dict:
+        shared = page.shared_auto_rmax()
+        out = {}
+        for n, card in sorted(page._cards.items()):
+            row = {"calibration_source": "file" if card.using_file() else "calibrate_tab",
+                   "calibration_file": card.file_path() if card.using_file() else None,
+                   "caking": card.caking()}
+            try:
+                spec = page._spec_for(n)
+                row.update(ok=True, Lsd=float(spec.Lsd), pxY=float(spec.pxY),
+                           tx=float(spec.tx),
+                           wavelength_A=float(spec.Wavelength),
+                           r_max_effective=float(getattr(spec, "RMax", 0) or 0) or shared)
+            except Exception as e:
+                row.update(ok=False, error=str(e))
+            out[f"ge{n}"] = row
+        return out
+
+    # ── preflight (mirrors the guards in _run_all, which would pop a dialog) ──
+    def _hb_preflight(self, page) -> Optional[str]:
+        from midas_gui.helpers import check_output_dir_writable
+        if page._workers:
+            return "a Hydra batch run is already in progress; wait for it or abort"
+        plan = page._scan_plan()
+        if not plan:
+            return "no scans loaded: call hydra_batch_set_scans first"
+        if not page._fmt.checked_keys():
+            return "no output format selected (hydra_batch_set_options formats=[...])"
+        if page._multi_azimuth_chk.isChecked() and page._rebin_cfg():
+            return "multi-azimuth output is not supported together with Q/2theta-uniform bins"
+        for out, panels in plan:
+            if not out:
+                return "no output directory: pass output_dir to hydra_batch_set_scans"
+            reason = check_output_dir_writable(str(out))
+            if reason:
+                return f"output folder not writable: {reason}"
+            usable = []
+            for n in panels:
+                try:
+                    page._spec_for(n)
+                    usable.append(n)
+                except Exception as e:
+                    return f"ge{n}: {e}"
+            if not usable:
+                return "no panel has a usable calibration"
+        return None
+
+    def _hb_status(self, report: dict) -> str:
+        if report.get("running"):
+            return "running"
+        if report.get("cancelled"):
+            return "aborted"
+        bad = []
+        for sc in report.get("scans", []):
+            bad += [k for k, v in sc["panels"].items() if v["status"] != "done"]
+            c = sc.get("combine")
+            if c and (c["errors"] or c["wrote"] != c["total"]):
+                bad.append("combine")
+        return "failed" if bad or not report.get("scans") else "done"
+
+    # ── ops ─────────────────────────────────────────────────────────
+    def op_hydra_batch_get_state(self) -> dict:
+        page = self._hb_page()
+        return _ok({"panels": self._hb_panels_state(page),
+                    "options": self._hb_options(page),
+                    "scans": self._hb_plan(page),
+                    "shared_auto_rmax": page.shared_auto_rmax(),
+                    "running": bool(page._workers),
+                    "report": page.run_report()})
+
+    def op_hydra_batch_set_scans(self, paths, output_dir=None, dark=None) -> dict:
+        page = self._hb_page()
+        try:
+            return _ok({"scans": self._hb_apply_scans(page, paths, output_dir, dark)})
+        except ValueError as e:
+            return _err(e, kind="bad_args")
+
+    def op_hydra_batch_set_calibration(self, files=None, from_file=None) -> dict:
+        page = self._hb_page()
+        try:
+            return _ok({"calibration": self._hb_apply_calibration(page, files, from_file),
+                        "panels": self._hb_panels_state(page)})
+        except ValueError as e:
+            return _err(e, kind="bad_args")
+
+    def op_hydra_batch_set_caking(self, r_min=None, r_max=None, r_bin=None, eta_min=None,
+                                  eta_max=None, eta_bin=None, panels=None) -> dict:
+        page = self._hb_page()
+        try:
+            c = {"r_min": r_min, "r_max": r_max, "r_bin": r_bin,
+                 "eta_min": eta_min, "eta_max": eta_max, "eta_bin": eta_bin}
+            return _ok({"caking": self._hb_apply_caking(
+                page, {k: v for k, v in c.items() if v is not None}, panels),
+                "shared_auto_rmax": page.shared_auto_rmax()})
+        except ValueError as e:
+            return _err(e, kind="bad_args")
+
+    def op_hydra_batch_set_options(self, **options) -> dict:
+        page = self._hb_page()
+        try:
+            return _ok({"options": self._hb_apply_options(page, options)})
+        except ValueError as e:
+            return _err(e, kind="bad_args")
+
+    def op_hydra_batch_run(self) -> dict:
+        page = self._hb_page()
+        problem = self._hb_preflight(page)
+        if problem:
+            return _err(problem, kind="precondition_failed")
+        job_id = str(uuid.uuid4())
+        self._jobs[job_id] = {"status": "running", "result": None, "error": None, "_hb": True}
+        self._hb_job_id = job_id
+
+        def _done(report, job_id=job_id):
+            try:                       # one-shot: later runs must not rewrite this job
+                page.runFinished.disconnect(_done)
+            except Exception:
+                pass
+            st = self._hb_status(report)
+            self._jobs[job_id] = {"status": st, "result": report,
+                                  "error": None if st == "done" else f"run {st}", "_hb": True}
+
+        # Connect BEFORE starting: a run whose panels all skip synchronously
+        # finishes inside _run_all.
+        page.runFinished.connect(_done)
+        page._run_all()
+        if not page._report.get("running") and self._jobs[job_id]["status"] == "running":
+            _done(page.run_report())
+        return _ok({"job_id": job_id, "scans": self._hb_plan(page)})
+
+    def op_hydra_batch_get_job(self, job_id) -> dict:
+        job = self._jobs.get(job_id)
+        if job is None:
+            return _err(f"unknown job_id {job_id!r}", kind="bad_args")
+        page = self._hb_page()
+        out = {k: v for k, v in job.items() if not k.startswith("_")}
+        if "queue" in job:
+            out["queue"] = job["queue"]
+        if job["status"] == "running":
+            out["report"] = page.run_report()
+            try:
+                out["log_tail"] = page._log.toPlainText().splitlines()[-12:]
+            except Exception:
+                pass
+        return _ok(out)
+
+    def op_hydra_batch_abort(self) -> dict:
+        page = self._hb_page()
+        if self._hb_queue is not None:
+            self._hb_queue["abort"] = True
+        was = bool(page._workers)
+        page._abort_all()
+        return _ok({"aborted": was})
+
+    def op_hydra_batch_run_queue(self, jobs, stop_on_error: bool = False) -> dict:
+        """Run several datasets back to back, each with its own calibration set.
+
+        Each job: ``{"name", "scans": [panel file, ...], "calibration":
+        {"files": {...}} | {"from_file": path}, "output_dir", "dark"?,
+        "caking"?, "options"?}``. Everything is validated before anything
+        starts; jobs then run one after another through the page."""
+        if self._hb_queue is not None and not self._hb_queue.get("finished"):
+            return _err("a hydra_batch queue is already running", kind="precondition_failed")
+        if not jobs:
+            return _err("jobs must be a non-empty list", kind="bad_args")
+        page = self._hb_page()
+        if page._workers:
+            return _err("a Hydra batch run is already in progress", kind="precondition_failed")
+        from midas_gui import hydra
+        for i, j in enumerate(jobs):
+            for key in ("scans", "calibration", "output_dir"):
+                if not j.get(key):
+                    return _err(f"jobs[{i}] is missing {key!r}", kind="bad_args")
+            cal = j["calibration"]
+            if (("files" in cal) == ("from_file" in cal)):
+                return _err(f"jobs[{i}].calibration needs exactly one of files / from_file",
+                            kind="bad_args")
+            for q in j["scans"]:
+                if not Path(q).is_file() or hydra.panel_for_file(q) is None:
+                    return _err(f"jobs[{i}]: bad scan file {q!r}", kind="bad_args")
+        qid = str(uuid.uuid4())
+        names = [j.get("name") or f"job{i}" for i, j in enumerate(jobs)]
+        q = {"id": qid, "jobs": list(jobs), "names": names, "pos": -1, "stop": bool(stop_on_error),
+             "abort": False, "finished": False,
+             "results": [{"name": n, "status": "pending"} for n in names]}
+        self._hb_queue = q
+        self._jobs[qid] = {"status": "running", "result": None, "error": None, "_hb": True,
+                           "queue": q["results"]}
+        page.runFinished.connect(self._hb_queue_on_finished)
+        self._hb_queue_next()
+        return _ok({"job_id": qid, "jobs": names})
+
+    # queue engine: advance from a QTimer so we never start the next run
+    # re-entrantly from inside the previous run's runFinished emission.
+    def _hb_queue_on_finished(self, report: dict) -> None:
+        q = self._hb_queue
+        if q is None or q["finished"] or q["pos"] < 0:
+            return
+        res = q["results"][q["pos"]]
+        res["status"] = self._hb_status(report)
+        res["report"] = report
+        from PyQt5 import QtCore
+        QtCore.QTimer.singleShot(0, self._hb_queue_next)
+
+    def _hb_queue_finish(self) -> None:
+        q = self._hb_queue
+        q["finished"] = True
+        sts = [r["status"] for r in q["results"]]
+        st = ("aborted" if q["abort"] else "done" if all(s == "done" for s in sts) else "failed")
+        self._jobs[q["id"]] = {"status": st, "result": {"jobs": q["results"]},
+                               "error": None if st == "done" else f"queue {st}",
+                               "_hb": True, "queue": q["results"]}
+        try:
+            self._hb_page().runFinished.disconnect(self._hb_queue_on_finished)
+        except Exception:
+            pass
+
+    def _hb_queue_next(self) -> None:
+        q = self._hb_queue
+        if q is None or q["finished"]:
+            return
+        if q["pos"] >= 0 and q["stop"] and q["results"][q["pos"]]["status"] != "done":
+            for r in q["results"][q["pos"] + 1:]:
+                r["status"] = "skipped"
+            return self._hb_queue_finish()
+        q["pos"] += 1
+        if q["abort"] or q["pos"] >= len(q["jobs"]):
+            for r in q["results"][q["pos"]:]:
+                if r["status"] == "pending":
+                    r["status"] = "skipped"
+            return self._hb_queue_finish()
+        job, res = q["jobs"][q["pos"]], q["results"][q["pos"]]
+        page = self._hb_page()
+        try:
+            self._hb_apply_scans(page, job["scans"], job["output_dir"], job.get("dark"))
+            self._hb_apply_calibration(page, **job["calibration"])
+            if job.get("options"):
+                self._hb_apply_options(page, job["options"])
+            if job.get("caking"):
+                self._hb_apply_caking(page, job["caking"])
+            problem = self._hb_preflight(page)
+        except Exception as e:                      # noqa: BLE001 - reported per job
+            problem = str(e)
+        if problem:
+            res.update(status="failed", error=problem)
+            from PyQt5 import QtCore
+            QtCore.QTimer.singleShot(0, self._hb_queue_next)
+            return
+        res["status"] = "running"
+        page._run_all()
+        if not page._report.get("running") and res["status"] == "running":
+            self._hb_queue_on_finished(page.run_report())
+
+
+class GuiController(_SolveCellOps, _ProjectOps, _HydraBatchOps):
     """Dispatches ``"namespace.verb"`` ops (see the module docstring) against
     the live ``main_window``'s Data Viewer and Calibrate tabs."""
 
@@ -1077,6 +1488,8 @@ class GuiController(_SolveCellOps, _ProjectOps):
         if sc is not None:
             sc.set_agent_mode(True)
             sc.stageFinished.connect(self._on_sc_stage_finished)
+        self._hb_queue = None    # the running/last hydra_batch.run_queue, if any
+        self._hb_job_id = None
         self._sc_job_id = None   # the one in-flight Solve Cell job, if any
         self._sc_chain = None    # the running domain loop (see op_solve_cell_run_domain_loop), if any
 
@@ -1097,7 +1510,7 @@ class GuiController(_SolveCellOps, _ProjectOps):
     # knowledge rather than control_server.py's, even though the *call* to
     # switch happens there (see that module's _handle_line).
     _NAMESPACE_TABS = {"data_viewer": "_view_tab", "calibrate": "_cal_tab",
-                       "solve_cell": "_solve_cell_tab"}
+                       "solve_cell": "_solve_cell_tab", "hydra_batch": "_batch_tab"}
 
     # Specific op -> a no-arg method on that op's own namespace tab widget
     # that brings the right *sub*-view to the front within it (e.g. the Data
