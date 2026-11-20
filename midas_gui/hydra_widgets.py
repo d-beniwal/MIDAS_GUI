@@ -644,9 +644,13 @@ class HydraLoaderPanel(QtWidgets.QWidget):
     #: far shares this convention (see hydra_default_geometry's callers).
     DATASET = "exchange/data"
 
-    def __init__(self, parent=None, *, mode="nav"):
+    def __init__(self, parent=None, *, mode="nav", masks: Optional[bool] = None):
         super().__init__(parent)
         self._mode = mode
+        #: Per-panel Mask card. On by default for "stream" (Batch Integrate);
+        #: Hydra Calibrate asks for it in "nav" mode too, since the fit needs
+        #: the same panel-specific bad-pixel/beamstop masks.
+        self._with_masks = (mode == "stream") if masks is None else bool(masks)
         self._pick_origin = None    # how the data was PICKED — see pick_origin()
         self._pick_root = None      # the folder a traversal started from
         self._siblings: dict = {}
@@ -809,10 +813,10 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             fld.body.addWidget(w)
         lv.addWidget(fld)
 
-        # ── Mask (stream mode only — independent per panel, no sibling
-        #    auto-discovery: bad-pixel/beamstop masks are physically
+        # ── Mask (stream mode, or on request — independent per panel, no
+        #    sibling auto-discovery: bad-pixel/beamstop masks are physically
         #    panel-specific and don't follow a shared naming convention) ──
-        if self._mode == "stream":
+        if self._with_masks:
             mask_card = S.make_card("Mask  (independent per panel)")
             for n in (1, 2, 3, 4):
                 sel = MaskSelector(compact=True)

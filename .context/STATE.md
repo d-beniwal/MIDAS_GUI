@@ -4,7 +4,7 @@ Last updated: 2026-11-17 (d-spacing x-axis + pixel R readout)
 
 ## Now working on
 
-2026-11-19: **Branch `hydra_ui`** (local, unpushed): redesigning the Hydra Calibrate/Integrate panels to match single-detector ones. Step 1 done: shared `CalibrationParameterTable` bound to the selected panel in Hydra Calibrate (DECISIONS 2026-11-19 hydra_ui). Next: Projection, Rings..., overlay toggles, then Integrate.
+2026-11-19: **Branch `hydra_ui`** (local, unpushed): redesigning the Hydra Calibrate/Integrate panels to match single-detector ones. Hydra Calibrate is done (shared parameter table, per-panel masks + Mask/Lab-axes overlays, Rings..., Projection, Panels tab; DECISIONS 2026-11-19 hydra_ui steps 1-2). Next: Hydra Integrate.
 
 2026-11-19 (evening): **Hydra tx fixed to 300/30/120/210 everywhere** (viewer, Calibrate seed, Batch, defaults, `batch_cli --tx`; DECISIONS 2026-11-19 evening); real connoly_oct26 R-eta map made via `hydra_batch` ops. Uncommitted. Open: tx values were read off a screenshot; Batch Queue/tab_queue not pinned; two calibrate tests fail on HEAD too (demo image).
 

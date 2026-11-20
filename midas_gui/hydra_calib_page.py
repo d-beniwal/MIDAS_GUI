@@ -15,13 +15,11 @@ safe to log in full: ``workers.CalibrationWorker`` runs each panel's
 calibration in its own OS process, so N panels in flight at once each own
 their own real stdout rather than racing on one process-global stream.
 
-Deliberately does NOT surface ``HydraLoaderPanel.projection_card()`` — the
-single-detector Calibrate tab has no stack-projection feature either (it
-only offers a frame mean), and ``HydraLoaderPanel.projected(n)`` returns
-an *already* dark/bright/background-corrected frame, which would be
-double-corrected if handed to ``CalibrationWorker`` (which expects a raw
-frame and applies bright/background itself). Taking a frame mean instead
-(the "Mean of frames" card below) mirrors the single-detector tab exactly.
+The loader's Projection card (Max / Sum / Mean over a frame range, per panel) is
+surfaced here as it is in single-detector Calibrate. A projected frame is already
+dark/bright/background-corrected, so ``_corr_fields`` hands ``CalibrationWorker``
+no corrections while one is active (it would otherwise subtract them twice);
+"Mean of frames" is disabled meanwhile.
 """
 from __future__ import annotations
 
@@ -31,7 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PyQt5 import QtCore, QtWidgets
+from PyQt5 import QtCore, QtGui, QtWidgets
 
 from midas_gui.constants import (
     CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, restored_pipeline_label, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
@@ -275,7 +273,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             "(BC/Lsd/tilts/transforms) from the Data Viewer's Hydra page.")
         self._from_view_btn.clicked.connect(self.pullFromViewer.emit)
         ll.addWidget(self._from_view_btn)
-        self._loader = HydraLoaderPanel()
+        self._loader = HydraLoaderPanel(masks=True)
         self._loader.siblingsChanged.connect(self._on_siblings_changed)
         self._loader.frameChanged.connect(self._on_frame_changed)
         self._loader.fieldsChanged.connect(self._on_fields_changed)
@@ -333,6 +331,17 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         wl_row.addWidget(make_kedge_label(self._wl, "λ:")); wl_row.addWidget(self._wl)
         wl_row.addSpacing(10)
         wl_row.addWidget(S.LabelRight("Calibrant:")); wl_row.addWidget(self._cal)
+        # Ring numbers (backend ``ring_nr``) unticked in "Rings…". One choice for
+        # all four fits (the recipe is shared); empty = every ring, the default.
+        # Reset on a real calibrant change, since ring numbers belong to one
+        # calibrant -- via currentTextChanged and not a restore path, which sets
+        # the combo with signals blocked and restores the list itself.
+        self._rings_excluded: list = []
+        self._rings_btn = QtWidgets.QPushButton("Rings…")
+        self._rings_btn.clicked.connect(self._edit_rings)
+        wl_row.addWidget(self._rings_btn)
+        self._cal.currentTextChanged.connect(self._reset_rings_for_calibrant)
+        self._sync_rings_btn()
         wl_row.addStretch(1)
         det.body.addLayout(wl_row)
         self._pxY = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm")
@@ -407,6 +416,12 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         for w in (self._avg_start, self._avg_end):
             w.valueChanged.connect(self._on_avg_changed)
         lv.addWidget(avgc)
+        # Stack projection (Max / Sum / Mean over a frame range, all panels): the
+        # loader owns it, as in the Hydra viewer. A projected frame is already
+        # dark/bright/background-corrected, so while one is active the fits get
+        # NO field corrections (see _corr_fields) and Mean of frames is off.
+        lv.addWidget(self._loader.projection_card())
+        self._loader.projectionChanged.connect(self._on_projection_changed)
         # Which panels are in play, what tx each will use, and which one is
         # running. Asked for at the beamline in one breath: "it is unclear
         # what parameters are dedicated to each GE panel ... which panel is
@@ -455,6 +470,8 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                         "_seed_en_ty", "_seed_en_tz"):
                 getattr(card, attr).toggled.connect(
                     lambda checked, n=n, a=attr: self._sync_seed_checkbox(a, n, checked, block=False))
+            card._seed_bcy.valueChanged.connect(self._redraw_lab_axes_if_on)
+            card._seed_bcz.valueChanged.connect(self._redraw_lab_axes_if_on)
             card._seed_tx.valueChanged.connect(lambda *_: self._update_panels_overview())
             card._seed_en_tx.toggled.connect(lambda *_: self._update_panels_overview())
             card.seedStateChanged.connect(self._refresh_seed_status)
@@ -719,6 +736,28 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._show_rings_check.toggled.connect(
             lambda c: self._active_card and self._active_card.set_show_rings(c))
         tb.addWidget(self._show_rings_check)
+        # Same two overlays as single-detector Calibrate. Both follow the
+        # ACTIVE panel: its own mask, and the lab-frame compass at its seed
+        # beam centre rolled by its fixed tx.
+        self._show_mask_check = QtWidgets.QCheckBox("Mask")
+        self._show_mask_check.setToolTip(
+            "Shade the active panel's mask on the image (bad pixels, beamstop, "
+            "gaps). Each panel has its own mask in the Data panel; excluded "
+            "pixels are left out of that panel's fit and integration.")
+        self._show_mask_check.toggled.connect(lambda *_: self._update_mask_overlay())
+        tb.addWidget(self._show_mask_check)
+        self._mask_status = QtWidgets.QLabel("")
+        self._mask_status.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        tb.addWidget(self._mask_status)
+        self._lab_axes_on = QtWidgets.QCheckBox("Lab-frame axes")
+        self._lab_axes_on.setToolTip(
+            "Overlay MIDAS lab-frame axes (X_Lab/Y_Lab), the beam-direction glyph "
+            "and an η sweep arc at the active panel's beam centre. Rolled by the "
+            "panel's fixed tx, so η = 0 points where the integration puts it.")
+        self._lab_axes_on.toggled.connect(self._on_lab_axes_toggled)
+        tb.addWidget(self._lab_axes_on)
+        self._axis_items: list = []
+        self._img_view.originChanged.connect(self._redraw_lab_axes_if_on)
         right.addWidget(self._img_view)
 
         bot = QtWidgets.QTabWidget()
@@ -782,6 +821,25 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         for n in (1, 2, 3, 4):
             self._results_stack.addWidget(self._cards[n].results_widget)
         bot.addTab(self._results_stack, "Results")
+
+        # Read-only side-by-side of the four fits. Judging a Hydra calibration
+        # means comparing panels (a panel whose Lsd or strain stands out), and
+        # the per-panel Results tab shows one at a time.
+        panels_tab = QtWidgets.QWidget()
+        pt_lay = QtWidgets.QVBoxLayout(panels_tab)
+        pt_lay.setContentsMargins(4, 4, 4, 4)
+        self._panels_table = QtWidgets.QTableWidget(4, len(self._PANEL_COLS))
+        self._panels_table.setHorizontalHeaderLabels([c[0] for c in self._PANEL_COLS])
+        self._panels_table.setVerticalHeaderLabels([f"ge{n}" for n in (1, 2, 3, 4)])
+        self._panels_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self._panels_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self._panels_table.horizontalHeader().setStretchLastSection(True)
+        pt_lay.addWidget(self._panels_table)
+        self._panels_note = QtWidgets.QLabel("")
+        self._panels_note.setWordWrap(True)
+        self._panels_note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        pt_lay.addWidget(self._panels_note)
+        bot.addTab(panels_tab, "Panels")
 
         self._log = LogPanel()
         bot.addTab(self._log, "Log")
@@ -861,6 +919,57 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             return ""
         return f" <b>{s:.0f} µε</b> ({s / 100.0:.2f}e-4)"
 
+    #: (header, attribute on the result, scale, format) for the Panels tab.
+    _PANEL_COLS = (("tx (°)", "tx", 1.0, "{:.1f}"), ("Lsd (mm)", "Lsd", 1e-3, "{:.3f}"),
+                   ("BC_y (px)", "BC_y", 1.0, "{:.2f}"), ("BC_z (px)", "BC_z", 1.0, "{:.2f}"),
+                   ("ty (°)", "ty", 1.0, "{:.4f}"), ("tz (°)", "tz", 1.0, "{:.4f}"),
+                   ("Strain (µε)", "post_residual_strain_uE", 1.0, "{:.0f}"))
+    #: A panel whose fitted Lsd differs from the panels' mean by more than this
+    #: fraction is flagged. R in pixels scales with Lsd, so the same ring then
+    #: sits at a different R on that panel (2θ/Q/d are unaffected).
+    _LSD_SPREAD_WARN = 0.001
+
+    def _update_panels_table(self) -> None:
+        """Fill the Panels tab from each panel's fitted result (blank until it
+        has one) and flag an Lsd outlier."""
+        if not hasattr(self, "_panels_table"):
+            return
+        lsds = {}
+        for r, n in enumerate((1, 2, 3, 4)):
+            res = getattr(self._cards.get(n), "result", None)
+            for c, (_hdr, attr, scale, fmt) in enumerate(self._PANEL_COLS):
+                val = getattr(res, attr, None) if res is not None else None
+                if attr == "tx":                        # fixed, shown even before a fit
+                    from midas_gui import hydra
+                    val = hydra.fixed_tx(n)
+                text = "" if val is None else fmt.format(float(val) * scale)
+                item = self._panels_table.item(r, c)
+                if item is None:
+                    item = QtWidgets.QTableWidgetItem()
+                    item.setTextAlignment(QtCore.Qt.AlignCenter)
+                    self._panels_table.setItem(r, c, item)
+                item.setText(text)
+                item.setBackground(QtGui.QBrush())
+                if attr == "Lsd" and val is not None:
+                    lsds[n] = float(val)
+        note = ""
+        if len(lsds) >= 2:
+            mean = sum(lsds.values()) / len(lsds)
+            spread = (max(lsds.values()) - min(lsds.values()))
+            col = [c[1] for c in self._PANEL_COLS].index("Lsd")
+            flagged = [n for n, v in lsds.items()
+                       if abs(v - mean) > self._LSD_SPREAD_WARN * mean]
+            for n in flagged:
+                self._panels_table.item(n - 1, col).setBackground(QtGui.QColor(224, 160, 48, 90))
+            note = (f"Lsd spread across panels: {spread / 1000:.3f} mm "
+                    f"({100.0 * spread / mean:.2f}%). ")
+            if flagged:
+                note += ("Panels differ in Lsd, so the same ring lands at a different R (px) "
+                         "on each — peaks still agree in 2θ, Q and d. Highlighted: "
+                         + ", ".join(f"ge{n}" for n in sorted(flagged))
+                         + ". Consider a tied or fixed common Lsd.")
+        self._panels_note.setText(note)
+
     def _update_panels_overview(self, running: Optional[int] = None):
         """One line naming every panel that will be fitted and the tx it
         will use, with the running one marked.
@@ -870,6 +979,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         omitted -- "ge3 is missing from this list" and "ge3 was left out on
         purpose" must not look the same.
         """
+        self._update_panels_table()
         if not hasattr(self, "_panels_lbl"):
             return
         selected = self._loader.siblings()
@@ -1194,6 +1304,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         the mean over a frame range if enabled, else the current frame.
         Deliberately raw: ``CalibrationWorker`` applies bright/background/
         transforms itself (see module docstring)."""
+        proj = self._loader.projected(n)
+        if proj is not None:
+            return proj
         path = self._loader.siblings().get(n)
         if path is None:
             return None
@@ -1230,10 +1343,28 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             return apply_radial_threshold(img, bc_y, bc_z, radii, values)
         return img
 
+    def _corr_fields(self, n: int):
+        """``(dark, bright, background, bright_mode)`` for panel ``n``'s fit.
+
+        All None while a projection is active: the projected frame already had
+        them applied by the loader, and the worker applying them again would
+        subtract the dark twice (same rule as single-detector Calibrate).
+        """
+        if self._loader.projected(n) is not None:
+            return None, None, None, self._loader.bright_mode()
+        return (self._loader.dark(n), self._loader.bright(n),
+                self._loader.background(n), self._loader.bright_mode())
+
+    def _on_projection_changed(self):
+        active = any(self._loader.projected(n) is not None for n in (1, 2, 3, 4))
+        self._avg_card.setEnabled(not active and self._loader.n_frames() > 1)
+        self._refresh_display()
+
     def _sync_avg_controls(self):
         n = self._loader.n_frames()
         multi = n > 1
-        self._avg_card.setEnabled(multi)
+        self._avg_card.setEnabled(
+            multi and not any(self._loader.projected(k) is not None for k in (1, 2, 3, 4)))
         if not multi and self._avg_check.isChecked():
             self._avg_check.blockSignals(True); self._avg_check.setChecked(False)
             self._avg_check.blockSignals(False)
@@ -1307,9 +1438,8 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         if raw is None:
             return
         img = self._calib_image_for(raw, n)
-        img = apply_field_corrections(
-            img, dark=self._loader.dark(n), bright=self._loader.bright(n),
-            bright_mode=self._loader.bright_mode(), background=self._loader.background(n))
+        _d, _b, _bg, _bm = self._corr_fields(n)
+        img = apply_field_corrections(img, dark=_d, bright=_b, bright_mode=_bm, background=_bg)
         im_trans = tuple(self._active_card.im_trans_codes())
         # Cheap post-transform shape (only `3`=transpose changes it — see
         # helpers._apply_im_trans) so the "fresh view" check below doesn't
@@ -1318,6 +1448,130 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         fresh = (self._disp_key != (disp_shape, n))
         self._disp_key = (disp_shape, n)
         self._img_view.set_raw_frame(img, im_trans, autorange=fresh, reset_levels=fresh)
+        self._update_mask_overlay()
+        self._redraw_lab_axes_if_on()
+
+    # ── Overlays: mask and lab-frame axes (active panel) ──────────
+
+    def _update_mask_overlay(self):
+        if not hasattr(self, "_show_mask_check") or self._active_card is None:
+            return
+        n = self._active_card.panel_number
+        mask = self._loader.composite_mask(n)
+        if mask is None:
+            self._mask_status.setText("")
+            self._img_view.clear_overlay()
+            return
+        mask = np.asarray(mask) != 0
+        shape = None
+        raw = self._panel_raw_image(n)
+        if raw is not None:
+            shape = np.asarray(raw).shape
+        if shape is not None and mask.shape != shape:
+            self._mask_status.setText(f"mask {mask.shape} ≠ image {shape}")
+            self._mask_status.setStyleSheet("color:#e0a030;font-size:10px")
+            self._img_view.clear_overlay()
+            return
+        k = int(mask.sum())
+        self._mask_status.setStyleSheet(f"color:{S.MUTED};font-size:10px")
+        self._mask_status.setText(f"{k:,} px ({100.0 * k / mask.size:.1f}%) excluded")
+        if self._show_mask_check.isChecked():
+            codes = tuple(self._active_card.im_trans_codes())
+            self._img_view.set_mask_overlay(_apply_im_trans(mask, codes) if codes else mask)
+            self._img_view.set_overlay_visible(True)
+        else:
+            self._img_view.clear_overlay()
+
+    def _on_lab_axes_toggled(self, checked: bool):
+        if checked:
+            self._draw_lab_axes()
+        else:
+            self._clear_lab_axes()
+
+    def _redraw_lab_axes_if_on(self, *_args):
+        if getattr(self, "_lab_axes_on", None) is not None and self._lab_axes_on.isChecked():
+            self._draw_lab_axes()
+
+    def _clear_lab_axes(self):
+        for it in self._axis_items:
+            self._img_view._iv.removeItem(it)
+        self._axis_items.clear()
+
+    def _draw_lab_axes(self):
+        self._clear_lab_axes()
+        card = self._active_card
+        img = self._img_view._data
+        if card is None or img is None:
+            return
+        from midas_gui import hydra
+        from midas_gui.widgets import build_lab_frame_axes_items
+        items = build_lab_frame_axes_items(
+            self._img_view._iv, img.shape, card._seed_bcy.value(), card._seed_bcz.value(),
+            tx=hydra.fixed_tx(card.panel_number) or 0.0)
+        for it in items:
+            self._img_view._iv.addItem(it)
+        self._axis_items.extend(items)
+
+    # ── Rings… (which calibrant rings the fits may use) ──────────
+
+    def _sync_rings_btn(self) -> None:
+        n = len(self._rings_excluded)
+        self._rings_btn.setText(f"Rings ({n} off)…" if n else "Rings…")
+        self._rings_btn.setToolTip(
+            ("Excluded from every panel's fit: ring "
+             + ", ".join(str(r) for r in self._rings_excluded) + ".")
+            if n else
+            "Choose which of the calibrant's rings the calibration uses — one "
+            "choice for all four panels. All rings are used by default.")
+
+    def _reset_rings_for_calibrant(self, _text: str = "") -> None:
+        self._rings_excluded = []
+        self._sync_rings_btn()
+
+    def _ring_rows_all_panels(self) -> list:
+        """Ring table rows that reach ANY panel, one per backend ``ring_nr``.
+
+        Each panel is built from its own fitted geometry when it has a result,
+        else its seed; a ring past one panel's edge but on another still
+        belongs in the list, since the exclusion applies to all four fits.
+        """
+        from midas_gui.calib import calibrant_ring_rows
+        pxz = self._pxZ_spin.value() if self._pxZ_check.isChecked() else None
+        rows: dict = {}
+        for n, card in sorted(self._cards.items()):
+            r = card.result
+            if r is not None:
+                lsd, by, bz = float(r.Lsd), float(r.BC_y), float(r.BC_z)
+                ny, nz = int(r.NrPixelsY or 2048), int(r.NrPixelsZ or 2048)
+            else:
+                lsd, by, bz = (card._seed_lsd.value() * 1000.0, card._seed_bcy.value(),
+                               card._seed_bcz.value())
+                ny = nz = 2048
+            for row in calibrant_ring_rows(
+                    self._cal.currentText(), wavelength=self._wl.value(),
+                    pxY=self._pxY.value(), pxZ=pxz, NY=ny, NZ=nz,
+                    lsd_um=lsd, bc_y=by, bc_z=bz):
+                rows.setdefault(row["ring_nr"], row)
+        return [rows[k] for k in sorted(rows)]
+
+    def _edit_rings(self) -> None:
+        from midas_gui.dialogs import RingSelectDialog
+        name = self._cal.currentText()
+        try:
+            rows = self._ring_rows_all_panels()
+        except Exception as e:
+            show_error(self, "Could not build the ring list",
+                       f"{type(e).__name__}: {e}", log=self._log)
+            return
+        note = (f"Rings that reach at least one panel at λ = {self._wl.value():.5g} Å, "
+                "using each panel's fitted geometry (or its seed before a fit). "
+                "One choice for all four panels. Ring # is the backend's label, so "
+                "it can skip numbers.")
+        dlg = RingSelectDialog(rows, self._rings_excluded, calibrant=name,
+                               note=note, parent=self)
+        if dlg.exec_():
+            self._rings_excluded = dlg.excluded()
+            self._sync_rings_btn()
 
     # ── Distortion coefficient selection ──────────────────────────
 
@@ -1434,8 +1688,11 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             # and all four panels share this cfg. It is resolved per panel in
             # _start_panel_worker, which is where the cfg forks.
             "im_trans": card.im_trans_codes(),
-            "mask": None,
+            # This panel's own mask (bad pixels / beamstop); None when unset.
+            "mask": self._loader.composite_mask(card.panel_number),
         }
+        if self._rings_excluded:
+            cfg["rings_to_exclude"] = list(self._rings_excluded)
         seed = card.manual_seed()
         if seed is not None:
             seed = dict(seed); seed["distortion"] = {}
@@ -1498,10 +1755,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                 self._start_next_sequential()
             return
         image = self._calib_image_for(raw, n)
-        dark = self._loader.dark(n)
-        bright = self._loader.bright(n)
-        background = self._loader.background(n)
-        bright_mode = self._loader.bright_mode()
+        dark, bright, background, bright_mode = self._corr_fields(n)
         cfg = self._build_cfg(card)
         # Each panel gets its own scratch leaf. In parallel mode all four
         # workers are in flight at once against one working directory, and
@@ -1538,6 +1792,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         result.im_trans = card.im_trans_codes()
         result._calibrant_name = self._cal.currentText()
         card.on_result(result, refine=self._last_cfgs.get(n, {}).get("refine"))
+        self._update_panels_overview()          # also refreshes the Panels tab
         self._update_save_all_enabled()
         self._log.append(f"[ge{n}] done — Lsd={result.Lsd/1000:.3f} mm")
         self._pending_log_results[n] = result
@@ -1623,11 +1878,12 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             return
         card = self._cards[n]
         im_trans = tuple(card.im_trans_codes())
+        _d, _b, _bg, _bm = self._corr_fields(n)
         w = IntegrationWorker(
-            result, image, self._loader.dark(n), im_trans,
+            result, image, _d, im_trans,
             r_bin=self._cal_r_bin.value(), eta_bin=self._cal_eta_bin.value(),
-            mask=None, parent=self, bright=self._loader.bright(n),
-            background=self._loader.background(n), bright_mode=self._loader.bright_mode(),
+            mask=self._loader.composite_mask(n), parent=self, bright=_b,
+            background=_bg, bright_mode=_bm,
             weighted=bool(self._cal_azim.currentData()))
         w.finished.connect(lambda data, n=n, result=result: self._on_int_done(n, result, data))
         w.failed.connect(lambda m, n=n: self._on_int_failed(n, m))
@@ -1881,6 +2137,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             # No widget of its own — see CalibrationTab.get_state's copy.
             "dist_coeffs": sorted(self._dist_coeffs),
             "thr_points": self._thr_editor.pick_state(),
+            "rings_excluded": list(self._rings_excluded),
         }
 
     def set_state(self, state: dict):
@@ -1901,6 +2158,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         if dist_coeffs is not None:
             self._dist_coeffs = set(dist_coeffs)
         self._update_dist_label()   # signals were blocked above; resync the caption
+        # Absent in older projects -> every ring, the old behaviour.
+        self._rings_excluded = sorted(int(r) for r in (state.get("rings_excluded") or ()))
+        self._sync_rings_btn()
         self._img_view.set_display_state(state.get("img_view"))
         self._origin_btn.sync()
         for n_key, cv_state in (state.get("cake_views") or {}).items():

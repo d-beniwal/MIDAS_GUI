@@ -108,6 +108,67 @@ def _resolve_cmap(name):
 #  ImageViewer
 # ═════════════════════════════════════════════════════════════════════════════
 
+def _harden_pg_view_registry() -> None:
+    """Make pyqtgraph's view registry tolerate ViewBoxes whose C++ object is gone.
+
+    Constructing ANY ViewBox-bearing item (``pg.ImageView`` registers two) calls
+    ``ViewBox.updateAllViewLists``, which walks every ViewBox ever created in
+    the process and, for each, sorts every *named* one. One whose Qt object was
+    already destroyed (a page torn down, a viewer collected) raises "wrapped
+    C/C++ object of type ViewBox has been deleted" from inside an unrelated
+    constructor. ``_detach_from_pg_view_registry`` only removes ImageViews, and
+    only AFTER they are built, so plain plot widgets and the window between
+    construction and detach still leave stale entries -- and Python's GC can
+    destroy one between any two steps, so a single up-front purge is not enough.
+
+    Two guards: dead views are purged before each registry walk, and the
+    per-view update retries after a purge (and skips that view if it still
+    fails) instead of letting the exception escape. Live views are untouched.
+    """
+    try:
+        from PyQt5 import sip
+        orig_all = pg.ViewBox.updateAllViewLists
+        orig_one = pg.ViewBox.updateViewLists
+    except Exception:
+        return
+    if getattr(orig_one, "_midas_hardened", False):
+        return
+
+    def _dead(vb) -> bool:
+        try:
+            return sip.isdeleted(vb)
+        except TypeError:
+            return False
+
+    def _purge() -> None:
+        for vb in [v for v in list(pg.ViewBox.AllViews) if _dead(v)]:
+            pg.ViewBox.AllViews.pop(vb, None)
+        for name, vb in list(pg.ViewBox.NamedViews.items()):
+            if _dead(vb):
+                pg.ViewBox.NamedViews.pop(name, None)
+
+    def _safe_update_view_lists(self):
+        for _ in range(3):
+            _purge()
+            try:
+                return orig_one(self)
+            except RuntimeError:        # a view died mid-walk; purge and retry
+                continue
+
+    def _safe_update_all_view_lists():
+        _purge()
+        for v in list(pg.ViewBox.AllViews):
+            if not _dead(v):
+                v.updateViewLists()
+
+    _safe_update_view_lists._midas_hardened = True
+    pg.ViewBox.updateViewLists = _safe_update_view_lists
+    pg.ViewBox.updateAllViewLists = staticmethod(_safe_update_all_view_lists)
+
+
+_harden_pg_view_registry()
+
+
 def _detach_from_pg_view_registry(iv: "pg.ImageView") -> None:
     """Take an ImageView's ViewBoxes out of pyqtgraph's process-global view
     registry.

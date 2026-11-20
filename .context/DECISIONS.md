@@ -3,6 +3,21 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-19 (hydra_ui, step 2) — Hydra Calibrate: masks, overlays, Rings..., Projection, Panels tab
+
+Branch `hydra_ui` (unpushed). Rest of the agreed Calibrate scope, all reusing single-detector pieces:
+
+- **Per-panel masks** (was a real gap: the page hard-coded `mask: None`). `HydraLoaderPanel(masks=True)` builds the four MaskSelectors in nav mode (default unchanged, so the Data Viewer's Hydra loader is untouched); each panel's fit (`_build_cfg`) and its cake integration get that panel's own mask. **Mask overlay** toggle + pixel count / shape-mismatch status follow the active panel.
+- **Lab-frame axes** toggle at the active panel's seed BC, rolled by its fixed tx (`build_lab_frame_axes_items(..., tx=)`; it lives in `widgets`, not `helpers`).
+- **Rings...** next to Calibrant: one exclusion list for all four fits (`cfg["rings_to_exclude"]`, honoured by One-shot as in single Calibrate), rows = union of rings reaching any panel (each panel from its fit, else its seed), reset on calibrant change, saved in project state (`rings_excluded`).
+- **Projection card**: the loader's existing card (Max/Sum/Mean over a frame range, per panel) is surfaced under Mean of frames. A projected frame is already dark/bright/background-corrected, so `_corr_fields(n)` gives the fit and the integration NO corrections while one is active (same rule as single Calibrate); Mean of frames is disabled meanwhile. The module docstring that said single Calibrate has no projection was stale and is rewritten.
+- **Panels tab**: read-only table of fixed tx, fitted Lsd, BC, ty, tz and strain per panel, highlighting any Lsd more than 0.1% from the mean with a note that R (px) then differs per panel while 2theta/Q/d agree (see DOMAIN.md). Refreshes after each fit.
+- **Deliberately not done:** d-spacing / custom calibrants (the Hydra workers have no manual d-spacing route; the Calibrant list stays crystalline-only).
+
+**Shared-code fix:** `widgets._harden_pg_view_registry()` makes pyqtgraph's view registry skip ViewBoxes whose C++ object is gone (purge before each `updateAllViewLists`; per-view update retries after a purge). The new page changed GC timing enough to make `test_project` / `test_tx_azimuth_range` intermittently fail with "wrapped C/C++ object of type ViewBox has been deleted" while constructing an unrelated `CalibrationTab`; the existing `_detach_from_pg_view_registry` only covers ImageViews, only after construction. After the patch: test_tx_azimuth_range 4/4, test_project 12/12, full sweep clean. (Earlier two flaky runs coincided with a concurrent background sweep.)
+
+**Tests:** new `tests/test_hydra_calibrate_parity.py` (8). All hydra / calibrate / control_api / project / batch files pass per-file. Checked visually offscreen. **Next:** Hydra Integrate (View calibration / Cake parameters blocks, Detector-view toggles).
+
 ## 2026-11-19 (hydra_ui branch) — Hydra Calibrate: one shared parameter table bound to the selected panel
 
 Branch `hydra_ui` (not pushed). Direction agreed with the user: Calibrate first, then Integrate; ONE `CalibrationParameterTable` (the single-detector widget) bound to the selected GE panel; reuse single-detector components rather than copy.
