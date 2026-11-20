@@ -4,6 +4,8 @@ Last updated: 2026-11-17 (d-spacing x-axis + pixel R readout)
 
 ## Now working on
 
+2026-11-19: **Branch `hydra_ui`** (local, unpushed): redesigning the Hydra Calibrate/Integrate panels to match single-detector ones. Step 1 done: shared `CalibrationParameterTable` bound to the selected panel in Hydra Calibrate (DECISIONS 2026-11-19 hydra_ui). Next: Projection, Rings..., overlay toggles, then Integrate.
+
 2026-11-19 (evening): **Hydra tx fixed to 300/30/120/210 everywhere** (viewer, Calibrate seed, Batch, defaults, `batch_cli --tx`; DECISIONS 2026-11-19 evening); real connoly_oct26 R-eta map made via `hydra_batch` ops. Uncommitted. Open: tx values were read off a screenshot; Batch Queue/tab_queue not pinned; two calibrate tests fail on HEAD too (demo image).
 
 2026-11-19: **Hydra-via-MCP benchmark** (`test_data/hydra_mcp_bench/`, DECISIONS 2026-11-19): MCP has no Hydra/Batch ops; headless Hydra combine fails with auto R max (per-panel n_R differs); fixed R range works. **Superseded same day:** `hydra_batch.*` ops + shared auto Rmax implemented and bench-verified (DECISIONS 2026-11-19 later); uncommitted. Also stale: d/R work is committed (802d72d).

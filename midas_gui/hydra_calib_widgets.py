@@ -32,7 +32,7 @@ from midas_gui.helpers import (
     write_standalone_paramstest, apply_dict_to_widgets, rmax_corner_px,
     _PARAMSTEST_DISTORTION)
 from midas_gui.widgets import ResidualBarChart, _mono_font
-from midas_gui.dialogs import _SaveParamstestDialog, ManualSeedDialog, show_error
+from midas_gui.dialogs import _SaveParamstestDialog, show_error
 from midas_gui import style as S
 
 
@@ -237,23 +237,19 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             "back into these seed fields so the next run starts from them.")
         self._seed_note = QtWidgets.QLabel("")
         self._seed_note.setStyleSheet(f"color:{S.ACCENT};font-size:10px"); self._seed_note.setWordWrap(True)
-        self._seed_dialog = ManualSeedDialog(
-            en_bc=self._seed_en_bc, bcy=self._seed_bcy, bcz=self._seed_bcz,
-            en_lsd=self._seed_en_lsd, lsd=self._seed_lsd,
-            en_tx=self._seed_en_tx, tx=self._seed_tx,
-            en_ty=self._seed_en_ty, ty=self._seed_ty,
-            en_tz=self._seed_en_tz, tz=self._seed_tz,
-            feedback_check=self._feedback_check, note=self._seed_note, parent=self)
-        self._seed_btn = QtWidgets.QPushButton("Manual seed…")
-        self._seed_btn.setToolTip(
-            "Choose which of BC / Lsd / tx / ty / tz to seed this panel's fit "
-            "from. Use Pick BC / Pick Ring on the image to populate BC while "
-            "this is open.\n\n"
-            "Which parameters are ticked is shared by all four panels; the "
-            "VALUES are this panel's own — that is how four panels get "
-            "seeded the same way with their own distinct geometry.")
-        self._seed_btn.clicked.connect(self._open_seed_dialog)
-        seed.body.addWidget(self._seed_btn)
+        # The seed widgets are NOT shown in this card any more. The page's one
+        # CalibrationParameterTable (the same table single-detector Calibrate
+        # uses) borrows them via rebind_seed() and shows whichever panel is
+        # selected, next to the shared Refine ticks and Limits. They stay
+        # parented here, hidden, while another panel is selected.
+        for _w in (self._seed_en_bc, self._seed_en_lsd, self._seed_en_tx,
+                   self._seed_en_ty, self._seed_en_tz,
+                   self._seed_bcy, self._seed_bcz, self._seed_lsd,
+                   self._seed_tx, self._seed_ty, self._seed_tz):
+            _w.setParent(self)
+            _w.hide()
+        seed.body.addWidget(self._feedback_check)
+        seed.body.addWidget(self._seed_note)
         self._seed_summary_lbl = QtWidgets.QLabel("")
         self._seed_summary_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._seed_summary_lbl.setWordWrap(True)
@@ -319,11 +315,6 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
             if en.isChecked() or (key == "tx" and getattr(self, "_tx_pinned", False)):
                 manual[key] = w.value()
         return manual or None
-
-    def _open_seed_dialog(self):
-        self._seed_dialog.show()
-        self._seed_dialog.raise_()
-        self._seed_dialog.activateWindow()
 
     def _on_seed_enable_changed(self, *_args):
         self._syncing_seed_master = True
@@ -396,6 +387,18 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         self._seed_summary_lbl.setStyleSheet(
             f"color:{S.ACCENT if on else S.MUTED};font-size:10px")
         self.seedStateChanged.emit()
+
+    def seed_ticks(self) -> dict:
+        """Seed-vocabulary key -> this panel's "include in seed" tick."""
+        return {"BC": self._seed_en_bc, "Lsd": self._seed_en_lsd,
+                "tx": self._seed_en_tx, "ty": self._seed_en_ty,
+                "tz": self._seed_en_tz}
+
+    def seed_values(self) -> dict:
+        """Seed key -> this panel's start-value box."""
+        return {"BC_y": self._seed_bcy, "BC_z": self._seed_bcz,
+                "Lsd": self._seed_lsd, "tx": self._seed_tx,
+                "ty": self._seed_ty, "tz": self._seed_tz}
 
     def seed_tx_value(self) -> float:
         """The tx this panel's fit will actually use: the seeded angle, or

@@ -55,6 +55,7 @@ from midas_gui.dialogs import (DistortionRefineDialog, _SaveParamstestDialog,
 from midas_gui import project
 from midas_gui import settings
 from midas_gui import style as S
+from midas_gui.calib_param_table import CalibrationParameterTable
 from midas_gui.panel_toggle import install_panel_toggles
 
 
@@ -503,29 +504,6 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._ref_dist = QtWidgets.QCheckBox("Distortion"); self._ref_dist.setChecked(True)
         self._build_rc = QtWidgets.QCheckBox("Residual map"); self._build_rc.setChecked(True)
 
-        # Let each Manual seed row say what the fit will actually do with
-        # that parameter -- the same wiring tab_calibrate does, and the
-        # reason the single-detector dialog explains itself while this one
-        # came up blank. Reported twice: "the manual seed selections about
-        # what to refine information do not get translated to the
-        # mainwindow."
-        #
-        # Deliberately NOT a two-way sync. Seeding and refining are separate
-        # decisions (seeding something you do NOT refine is how you pin it
-        # to a measured value -- which is exactly what tx is for here).
-        # Showing the refine state on each row is what stops the two panels
-        # merely LOOKING like they disagree.
-        #
-        # All four cards get the page's own boxes because the Refine choice
-        # is one setting for all four fits. Wired here, after the Refine
-        # checkboxes above exist, rather than inside the per-panel card loop
-        # above (which runs before this card is built).
-        for card in self._cards.values():
-            card._seed_dialog.set_refine_boxes(
-                {"BC": self._ref_bc, "Lsd": self._ref_lsd, "tx": self._ref_tx,
-                 "ty": self._ref_ty, "tz": self._ref_tz,
-                 "Distortion": self._ref_dist})
-
         # One row per parameter: the refine checkbox on the left, and the
         # backend's always-applied ± tolerance window on the right — Hydra is
         # crystalline-only, so there is exactly one (always-on) kind of
@@ -534,51 +512,55 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         # _sync_limits_mode for why the two differ there). tx gets no window:
         # the crystalline backend never refines or bounds it (see
         # _compose_overall_cake's docstring above on tx).
-        rfl = QtWidgets.QGridLayout(); rfl.setHorizontalSpacing(2); rfl.setVerticalSpacing(4)
+        # The same CalibrationParameterTable single-detector Calibrate uses:
+        # one row per parameter with Seed / Refine / start value / ± window.
+        # Hydra shows ONE table, bound to the selected panel: the seed ticks
+        # and start values are that panel's own (rebind_seed swaps them when
+        # the panel changes), while the Refine ticks and ± windows are shared,
+        # one recipe for all four fits. tx is each panel's fixed installation
+        # azimuth (hydra.HYDRA_PANEL_TX): seeded, greyed out, never refined.
+        self._dist_row = QtWidgets.QWidget()
+        _dr = QtWidgets.QHBoxLayout(self._dist_row)
+        _dr.setContentsMargins(0, 0, 0, 0); _dr.setSpacing(4)
+        _dr.addWidget(self._ref_dist); _dr.addStretch(1)
+        _c1 = self._cards[1]
+        self._param_table = CalibrationParameterTable(
+            seed_ticks=_c1.seed_ticks(), seed_values=_c1.seed_values(),
+            refine_ticks={"BC": self._ref_bc, "Lsd": self._ref_lsd, "tx": self._ref_tx,
+                          "ty": self._ref_ty, "tz": self._ref_tz, "Wavelength": self._ref_wl},
+            dist_refine_row=self._dist_row,
+            on_distortion_clicked=self._edit_distortion_coeffs,
+            on_limits_changed=self._update_limits_note, parent=self)
+        self._param_table.rebind_seed(_c1.seed_ticks(), _c1.seed_values(), owner=_c1)
+        self._param_table.set_refine_boxes(
+            {"Wavelength": self._ref_wl, "BC": self._ref_bc, "Lsd": self._ref_lsd,
+             "tx": self._ref_tx, "ty": self._ref_ty, "tz": self._ref_tz,
+             "Distortion": self._ref_dist})
+        self._dist_btn = self._param_table.dist_count_lbl
+        self._limits_note = self._param_table._limits_note
         self._limit_widgets: dict = {}
-        # Built before the rows below connect to it (and before the prefill
-        # loop sets initial spin values, which fires valueChanged the moment
-        # it's connected) — _update_limits_note must never run against a
-        # not-yet-existing label.
-        self._limits_note = QtWidgets.QLabel("")
-        self._limits_note.setStyleSheet(f"color:{S.MUTED};font-size:10px")
-        self._limits_note.setWordWrap(True)
-        _limit_specs = {r[0]: (r[2], r[3], r[4], r[5]) for r in PARAMETER_LIMIT_ROWS}
-
-        def _add_limit(name, row, rowspan=1, label=""):
-            unit0, win0, abs_unit, dec = _limit_specs[name]
-            spin = _fspin(0.0, 1e6, dec, win0, "")
-            combo = _NoScrollComboBox()
-            combo.addItems([u for u in ("%", abs_unit) if u])
-            combo.setCurrentText(unit0 or abs_unit)
-            spin.valueChanged.connect(self._update_limits_note)
-            combo.currentTextChanged.connect(self._update_limits_note)
-            if label:
-                rfl.addWidget(QtWidgets.QLabel(label), row, 1, rowspan, 1)
-            rfl.addWidget(QtWidgets.QLabel("±"), row, 2, rowspan, 1)
-            rfl.addWidget(spin, row, 3, rowspan, 1)
-            rfl.addWidget(combo, row, 4, rowspan, 1)
-            self._limit_widgets[name] = (spin, combo)
-
-        rfl.addWidget(self._ref_lsd, 0, 0)
-        _add_limit("Lsd", 0)
-        rfl.addWidget(self._ref_bc, 1, 0)
-        _add_limit("BC_y", 1)
-        rfl.addWidget(self._ref_ty, 2, 0)
-        rfl.addWidget(self._ref_tz, 3, 0)
-        _add_limit("ty", 2, rowspan=2)
-        rfl.addWidget(self._ref_tx, 4, 0)
-        rfl.addWidget(self._ref_wl, 5, 0)
-        _add_limit("wavelength_A", 5)
-        _add_limit("distortion", 6, label="Distortion")
-        rfl.setColumnStretch(4, 1)
-
+        # Hydra is crystalline-only: the backend ALWAYS applies a ± window, so
+        # the opt-in box has no meaning here (same handling as single-detector
+        # Calibrate in crystalline mode). Hold it checked and hide it; only the
+        # rows the crystalline backend actually windows are shown (tx, tz and
+        # BC_z have none: ty's window also bounds tz, BC_y's also BC_z).
+        # Fill the dict BEFORE ticking anything: ticking fires the limits-note
+        # callback, which reads every row of self._limit_widgets.
+        for _name, (_cb, _spin, _combo) in self._param_table.limit_widgets.items():
+            if _name in self._LIMIT_ROWS_XTAL:       # same keys the project state uses
+                self._limit_widgets[_name] = (_spin, _combo)
+        for _name, (_cb, _spin, _combo) in self._param_table.limit_widgets.items():
+            _cb.setChecked(True); _cb.hide()
+            self._param_table.set_limit_row_visible(_name, _name in self._LIMIT_ROWS_XTAL)
+        self._param_table.covers_following_row("ty", True)
+        self._param_table._limits_hdr.setText(
+            "Limits — always applied by the MIDAS backend, centred on each panel's "
+            "seed and shared by all four panels. These are the widths in force; "
+            "edit to tighten or loosen them.")
         # Prefill from the tol* defaults actually in force in the installed
-        # backend (not the manual-fit PARAMETER_LIMIT_ROWS defaults above,
-        # which are for an opt-in bound — these rows are always-on here, so
-        # they should show the real constraint, not an invitation to add
-        # one). Same values/units tab_calibrate.CalibrationTab's
-        # _xtal_default_limit_state() prefills with.
+        # backend (not the manual-fit PARAMETER_LIMIT_ROWS defaults, which are
+        # for an opt-in bound -- these rows are always-on here, so they show the
+        # real constraint, not an invitation to add one).
         from midas_gui.calib import tol_defaults
         _tols0 = tol_defaults()
         _xtal_defaults = {"Lsd": (_tols0["tolLsd"] / 1000.0, "mm"),
@@ -593,35 +575,13 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                 _idx = _combo.findText(_unit)
                 if _idx >= 0:
                     _combo.setCurrentIndex(_idx)
-        refc.body.addLayout(rfl)
-        refc.body.addWidget(self._limits_note)
-
-        rfl_bottom = QtWidgets.QGridLayout(); rfl_bottom.setSpacing(4)
-        self._dist_btn = QtWidgets.QToolButton(); self._dist_btn.setText("…")
-        self._dist_btn.setToolTip("Choose which distortion coefficients to refine.")
-        self._dist_btn.clicked.connect(self._edit_distortion_coeffs)
-        drow = QtWidgets.QHBoxLayout(); drow.setSpacing(4)
-        drow.addWidget(self._ref_dist); drow.addWidget(self._dist_btn); drow.addStretch(1)
-        rfl_bottom.addLayout(drow, 0, 0, 1, 2)
-        rfl_bottom.addWidget(self._build_rc, 0, 2)
+        refc.body.addWidget(self._param_table)
+        refc.body.addWidget(self._build_rc)
         self._ref_dist.toggled.connect(lambda _=0: self._update_dist_label())
         self._ref_dist.toggled.connect(self._update_limits_note)
         self._pipeline.currentIndexChanged.connect(self._update_limits_note)
-        refc.body.addLayout(rfl_bottom)
         lv.addWidget(refc)
 
-        # Let each Manual seed row say what the fit will actually do with
-        # that parameter. Deliberately AFTER the Refine card is built:
-        # upstream moved the per-panel stack ABOVE it, so self._ref_* do
-        # not exist yet while the cards are being constructed. Still
-        # one-way -- seeding and refining are separate decisions (seeding
-        # something you do NOT refine is how you pin tx to a measured
-        # value, which is exactly what tx is for here).
-        for _card in self._cards.values():
-            _card._seed_dialog.set_refine_boxes(
-                {"BC": self._ref_bc, "Lsd": self._ref_lsd, "tx": self._ref_tx,
-                 "ty": self._ref_ty, "tz": self._ref_tz,
-                 "Distortion": self._ref_dist})
         self._update_dist_label()
         self._update_limits_note()
 
@@ -1114,6 +1074,10 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             chk.blockSignals(True); chk.setChecked(cn == n); chk.blockSignals(False)
         self._active_card = self._cards[n]
         self._active_card.bind_viewer(self._img_view)
+        if hasattr(self, "_param_table"):
+            self._param_table.rebind_seed(self._active_card.seed_ticks(),
+                                          self._active_card.seed_values(),
+                                          owner=self._active_card)
         chk = self._show_rings_check
         chk.blockSignals(True); chk.setChecked(self._active_card.show_rings_checked())
         chk.blockSignals(False)
@@ -1367,7 +1331,8 @@ class HydraCalibrationPage(QtWidgets.QWidget):
 
     def _update_dist_label(self):
         n = len(self._dist_coeffs) if self._ref_dist.isChecked() else 0
-        self._ref_dist.setText(f"Distortion ({n}/15)")
+        self._ref_dist.setText("")
+        self._dist_btn.setText(f"{n}/15")
 
     # ── Refine "Limits" (always-on crystalline tolerance windows) ──────
     # Hydra is crystalline-only, so there is exactly one mode here — see

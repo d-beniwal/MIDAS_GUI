@@ -117,6 +117,13 @@ class CalibrationParameterTable(QtWidgets.QWidget):
         #: seed key -> its Refine tick. Filled by set_refine_boxes, which the
         #: caller can only call once both cards exist.
         self._refine_boxes: dict = {}
+        #: Where each seed widget sits, so :meth:`rebind_seed` can swap in
+        #: another owner's widgets (Hydra: one table, four panels' seeds).
+        #: ("tick", seed key) / ("value", seed key) -> (row, column).
+        self._seed_cells: dict = {}
+        #: seed key -> the widget currently placed there, and its owner.
+        self._seed_widgets: dict = {}
+        self._seed_owner = None
 
         # Exposed under the names the tab already uses for these, so the
         # existing limits machinery (_sync_limits_mode, _sync_seed_steps,
@@ -219,6 +226,8 @@ class CalibrationParameterTable(QtWidgets.QWidget):
                 tick = self._seed_boxes[tick_key]
                 tick.setText("")
                 grid.addWidget(tick, gr, 1)
+                self._seed_cells[("tick", tick_key)] = (gr, 1)
+                self._seed_widgets[("tick", tick_key)] = tick
             ref_key = "Wavelength" if name == "wavelength_A" else tick_key
             ref_box = refine_ticks.get(ref_key or "")
             if ref_box is not None:
@@ -237,6 +246,8 @@ class CalibrationParameterTable(QtWidgets.QWidget):
             if val_key is not None and val_key in seed_values:
                 seed_values[val_key].setMaximumWidth(100)
                 grid.addWidget(seed_values[val_key], gr, 3)
+                self._seed_cells[("value", val_key)] = (gr, 3)
+                self._seed_widgets[("value", val_key)] = seed_values[val_key]
             elif name == "distortion" and dist_seed_btn is not None:
                 grid.addWidget(dist_seed_btn, gr, 3)
 
@@ -307,6 +318,44 @@ class CalibrationParameterTable(QtWidgets.QWidget):
         lbl.setText("" if covers else self.limit_row_sub[name])
         lbl.setToolTip("One window bounds both ty and tz." if covers else "")
         lbl.setVisible(bool(lbl.text()))
+
+    # ── one table, several owners ───────────────────────────────────
+
+    def rebind_seed(self, seed_ticks: Mapping, seed_values: Mapping, owner=None):
+        """Show a different owner's seed widgets in the same cells.
+
+        The table *places* widgets the caller owns, so pointing it at another
+        set means taking the current ones back out and putting the new ones in
+        the same grid cells. Outgoing widgets are hidden and handed back to
+        ``owner`` of the previous bind (never left parentless: a parentless
+        widget is a top-level window). Used by the Hydra Calibrate page, where
+        one table edits whichever GE panel is selected while Refine and
+        Limits stay shared. A no-op for ``CalibrationTab``, which never calls
+        it.
+        """
+        old_owner = self._seed_owner
+        new = {**{("tick", k): w for k, w in seed_ticks.items()},
+               **{("value", k): w for k, w in seed_values.items()}}
+        for key, (row, col) in self._seed_cells.items():
+            incoming = new.get(key)
+            outgoing = self._seed_widgets.get(key)
+            if incoming is None or incoming is outgoing:
+                continue
+            if outgoing is not None:
+                self.grid.removeWidget(outgoing)
+                outgoing.hide()
+                if old_owner is not None:
+                    outgoing.setParent(old_owner)
+            if key[0] == "tick":
+                incoming.setText("")
+            else:
+                incoming.setMaximumWidth(100)
+            self.grid.addWidget(incoming, row, col)
+            incoming.show()
+            self._seed_widgets[key] = incoming
+        self._seed_boxes = dict(seed_ticks)
+        self._seed_owner = owner
+        self._sync_status()
 
     # ── refined parameters read green ───────────────────────────────
 

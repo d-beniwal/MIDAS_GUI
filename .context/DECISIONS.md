@@ -3,6 +3,16 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-19 (hydra_ui branch) — Hydra Calibrate: one shared parameter table bound to the selected panel
+
+Branch `hydra_ui` (not pushed). Direction agreed with the user: Calibrate first, then Integrate; ONE `CalibrationParameterTable` (the single-detector widget) bound to the selected GE panel; reuse single-detector components rather than copy.
+
+**Done (Calibrate, step 1):** the hand-built Refine/Limits grid and the per-panel "Manual seed..." dialog are replaced by the shared table. Seed ticks and start values are the selected panel's own (`CalibrationParameterTable.rebind_seed` swaps a card's widgets into the same grid cells; outgoing ones are hidden and returned to their card, never parentless); Refine ticks and +/- windows are the page's, shared by all four fits. tx is a seeded, greyed-out row with no refine tick (fixed per panel). Limits rows are always-on crystalline (opt-in box hidden and held checked; only Lsd, BC_y, ty, wavelength, distortion windows shown) so `_limit_widgets` keys and project state are unchanged. `HydraCalibPanelCard` now exposes `seed_ticks()` / `seed_values()` and shows "Feed result back to seed" + the seed note directly; `_seed_dialog`, `_seed_btn`, `_open_seed_dialog` are gone. Distortion shows the table's "n/15" line.
+
+**Tests:** four tests that pinned the dialog were rewritten against the table (`test_hydra_calib_panel_clarity`, `test_hydra_calib_ui`). All hydra / calibrate / control_api / project files pass per-file. Checked visually offscreen (ge2 selected: tx 30 pinned, refined rows green).
+
+**Not yet done (Calibrate):** Projection (Max/Sum) card, Rings... exclusion, Mask and Lab-frame-axes overlay toggles, Pick d-spacing parity/custom calibrant, a read-only four-panel results strip. **Then Integrate:** View calibration / Cake parameters blocks, Detector-view toggles (grid, lab axes, preview sum). Hydra Calibrate controls stay a 4-panel page: per-panel = transforms, seed, result; shared = pipeline, calibrant, refine, limits.
+
 ## 2026-11-19 (night) — Hydra ring R offsets between panels are per-panel Lsd, not binning; replotted on 2theta/Q/d
 
 Reported: in the merged R-eta map the CeO2 rings do not sit at the same R on every panel. Checked, no code change: the R grid is identical on all panels (centres 0.5, 1.5 ... step 1.0, 3250 bins); each panel's fitted rings match its OWN calibration (R = Lsd*tan2theta/px) within ~0.4 px; the connoly_oct26 11:48 fits have Lsd 2393.77 / 2395.92 / 2391.41 / 2392.20 mm (0.19% spread), which predicts the observed panel-to-panel R offsets (1.2 px at 111 up to 5.3 px at 620) to 0.27 px rms. K=2 resonance scatter is ~1e-5 of R, far too small. Documented in DOMAIN.md ("Hydra: peak positions agree in 2theta/Q/d, NOT necessarily in R").

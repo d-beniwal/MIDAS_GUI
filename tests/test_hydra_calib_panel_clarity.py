@@ -216,43 +216,59 @@ def test_an_unfitted_panel_shows_no_strain(app, tmp_path):
     assert "µε" not in page._panels_lbl.text()
 
 
-# ── the Manual seed dialog says what the fit will do with each row ─────
+# ── one parameter table, bound to the selected panel ───────────────────
 
-def test_the_seed_dialog_knows_the_refine_state(app, tmp_path):
-    """Reported twice: "the manual seed selections about what to refine
-    information do not get translated to the mainwindow."
-
-    set_refine_boxes was called only by the single-detector tab, so the
-    Hydra dialog's per-row status labels and its seed-vs-refine
-    explanation were never filled in -- the dialog came up blank about the
-    one thing being asked of it.
-    """
+def test_the_table_knows_the_refine_state(app, tmp_path):
+    """The Refine ticks are the page's own, shared by all four fits, and the
+    table reads them (names turn green while refined)."""
     page = _page_with_panels(tmp_path)
-    for n in (1, 2, 3, 4):
-        dlg = page._cards[n]._seed_dialog
-        assert dlg._refine_boxes, f"ge{n}: seed dialog has no refine state"
-        assert "Lsd" in dlg._refine_boxes and "tx" in dlg._refine_boxes
+    boxes = page._param_table._refine_boxes
+    assert boxes["Lsd"] is page._ref_lsd and boxes["tx"] is page._ref_tx
+    assert boxes["Distortion"] is page._ref_dist
 
 
-def test_every_panel_sees_the_pages_own_refine_boxes(app, tmp_path):
-    """The Refine choice is one setting for all four fits, so all four
-    dialogs must report the page's boxes, not per-card copies."""
+def test_the_table_shows_the_selected_panels_own_seed(app, tmp_path):
+    """One table for four panels: switching panel swaps in THAT panel's seed
+    ticks and start values (Refine and Limits stay shared)."""
     page = _page_with_panels(tmp_path)
-    for n in (1, 2, 3, 4):
-        assert page._cards[n]._seed_dialog._refine_boxes["Lsd"] is page._ref_lsd
+    t = page._param_table
+    for n in (2, 3, 4, 1):
+        page._on_panel_changed(f"ge{n}")
+        c = page._cards[n]
+        assert t._seed_widgets[("value", "Lsd")] is c._seed_lsd
+        assert t._seed_widgets[("tick", "tx")] is c._seed_en_tx
+        assert c._seed_lsd.parent() is not None
+        for other in (m for m in (1, 2, 3, 4) if m != n):
+            assert page._cards[other]._seed_lsd.isHidden(), \
+                f"ge{other}'s seed box is still showing while ge{n} is selected"
+    # the shared parts did not move
+    assert t._refine_boxes["Lsd"] is page._ref_lsd
 
 
 def test_the_row_status_follows_the_refine_tick(app, tmp_path):
-    """The point of the wiring: toggling Refine changes what each seed row
-    says the fit will do, without the two becoming one control."""
+    """Toggling Refine changes how the row reads (green name), without the
+    seed and refine ticks becoming one control."""
+    from midas_gui.calib_param_table import REFINED_COLOR
     page = _page_with_panels(tmp_path)
-    dlg = page._cards[1]._seed_dialog
+    name = page._param_table._name_widgets["Lsd"]
     page._ref_lsd.setChecked(True)
-    page._cards[1]._seed_en_lsd.setChecked(True)
-    held = dlg._status_lbls["Lsd"].text()
+    assert REFINED_COLOR in name.styleSheet()
     page._ref_lsd.setChecked(False)
-    assert dlg._status_lbls["Lsd"].text() != held, \
-        "the seed row's status did not follow the Refine tick"
+    assert REFINED_COLOR not in name.styleSheet()
+
+
+def test_the_hydra_limits_rows_are_always_on_and_crystalline_only(app, tmp_path):
+    """The backend always applies a window, so the opt-in box is hidden and
+    held checked; only the rows the crystalline backend windows are shown."""
+    page = _page_with_panels(tmp_path)
+    t = page._param_table
+    for name, (cb, _spin, _combo) in t.limit_widgets.items():
+        assert cb.isChecked() and cb.isHidden()
+    shown = {n for n, cells in t.limit_row_cells.items()
+             if not all(c.isHidden() for c in cells)}
+    assert shown == set(page._LIMIT_ROWS_XTAL)
+    # tx is a row in the table (seeded) but is never a refine option
+    assert not page._ref_tx.isEnabled()
 
 
 def test_seeding_and_refining_stay_separate_controls(app, tmp_path):

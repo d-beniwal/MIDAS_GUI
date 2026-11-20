@@ -281,18 +281,18 @@ def test_hydra_calib_page_wiring_and_pick_isolation(app, fixture_available, tmp_
     card2 = page._cards[2]
     card2._seed_en_bc.setChecked(False)
     assert card2._seed_en_bc.isChecked() is False
-    style_before = card2._seed_btn.styleSheet()
+    style_before = card2._seed_summary_lbl.styleSheet()
     card2._on_bc_picked(77.0, 88.0)
     assert card2._seed_bcy.value() == pytest.approx(77.0)
     assert card2._seed_bcz.value() == pytest.approx(88.0)
     assert card2._seed_en_bc.isChecked() is False
-    assert card2._seed_btn.styleSheet() == style_before
+    assert card2._seed_summary_lbl.styleSheet() == style_before
 
     card2._on_ring_fit_bc(5.0, 6.0, 20.0)
     assert card2._seed_bcy.value() == pytest.approx(5.0)
     assert card2._seed_bcz.value() == pytest.approx(6.0)
     assert card2._seed_en_bc.isChecked() is False
-    assert card2._seed_btn.styleSheet() == style_before
+    assert card2._seed_summary_lbl.styleSheet() == style_before
 
     # Refine "Limits": always-on crystalline tolerance windows, matching
     # tab_calibrate.CalibrationTab's own _LIMIT_ROWS_XTAL rows — previously
