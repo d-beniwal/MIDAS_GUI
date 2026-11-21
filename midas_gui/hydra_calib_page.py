@@ -283,6 +283,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         inner = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(inner); lv.setContentsMargins(2, 2, 2, 2); lv.setSpacing(8)
         scroll.setWidget(inner)
+        # Cap the content width so widening the panel leaves blank space on the
+        # right instead of stretching every row (incl. the footer below).
+        inner.setMaximumWidth(400)
 
         # The model, stated rather than implied. Asked for at the beamline:
         # "what does it mean shared parameters? Are ge1 - GE4 in hydra
@@ -499,6 +502,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             "selected one, and keep them in step while you edit. tx stays at "
             "each panel's fixed value. The Refine ticks and ± ranges below "
             "are already one setting for all four panels.")
+        self._all_same.setChecked(True)      # default on (before connect: nothing to copy yet)
         self._all_same.toggled.connect(self._on_all_same_toggled)
         _prow.addSpacing(8); _prow.addWidget(self._all_same); _prow.addStretch(1)
         refc.body.addLayout(_prow)
@@ -739,7 +743,11 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         mid_col = QtWidgets.QWidget()
         mid_v = QtWidgets.QVBoxLayout(mid_col); mid_v.setContentsMargins(0, 0, 0, 0); mid_v.setSpacing(0)
         mid_v.addWidget(scroll, 1)
-        mid_v.addWidget(footer)
+        footer.setMaximumWidth(400)
+        mid_col.setMaximumWidth(400 + 24)   # panel never wider than its content
+        frow = QtWidgets.QHBoxLayout(); frow.setContentsMargins(0, 0, 0, 0)
+        frow.addWidget(footer, 1000); frow.addStretch(1)
+        mid_v.addLayout(frow)
         split.addWidget(mid_col)
 
         # ── RIGHT: image viewer + bottom tabs ──

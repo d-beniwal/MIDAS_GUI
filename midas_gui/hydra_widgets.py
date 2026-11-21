@@ -782,8 +782,10 @@ class HydraLoaderPanel(QtWidgets.QWidget):
             sf.row(("stride:", self._fr_stride))
             card.body.addLayout(sf)
             card.body.addWidget(S.hline())
+            # Caption above the controls so the card's minimum width stays
+            # narrow (the path row's browse button must never be clipped).
+            card.body.addWidget(QtWidgets.QLabel("Combine sub-frames:"))
             cr = QtWidgets.QHBoxLayout(); cr.setSpacing(4)
-            cr.addWidget(QtWidgets.QLabel("Combine sub-frames:"))
             cr.addWidget(self._combine_chunk)
             cr.addWidget(QtWidgets.QLabel("op:"))
             cr.addWidget(self._combine_op)

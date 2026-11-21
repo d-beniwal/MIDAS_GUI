@@ -177,6 +177,10 @@ class HydraViewerPage(QtWidgets.QWidget):
         self._comp_page = self._build_composite_table_page()
         self._card_stack.addWidget(self._comp_page)
         scroll.setWidget(inner)
+        # Cap the content width so widening the panel leaves blank space
+        # instead of stretching every row; the panel itself never exceeds it.
+        inner.setMaximumWidth(400)
+        scroll.setMaximumWidth(400 + 24)
         # The multi-curve radial plot and shared R-bin/Auto controls are
         # built below (right side) before this loop's set_profile_view/
         # set_radial_controls calls, so build them first and reorder the

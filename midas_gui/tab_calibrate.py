@@ -329,6 +329,9 @@ class CalibrationTab(QtWidgets.QWidget):
         inner = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(inner); lv.setContentsMargins(2, 2, 2, 2); lv.setSpacing(8)
         scroll.setWidget(inner)
+        # Cap the content width so widening the panel leaves blank space on the
+        # right instead of stretching every row (incl. the footer below).
+        inner.setMaximumWidth(400)
 
         def _br(w=30):
             b = QtWidgets.QPushButton("…"); b.setFixedWidth(w); return b
@@ -509,6 +512,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._proj_skip = _NoScrollSpinBox(); self._proj_skip.setRange(0, 999999)
         self._proj_nframes = _NoScrollSpinBox(); self._proj_nframes.setRange(0, 999999)
         self._proj_nframes.setToolTip("Number of frames to project. 0 = all.")
+        self._proj_skip.setFixedWidth(72); self._proj_nframes.setFixedWidth(72)
         pf = S.Form()
         pf.row(("Skip frames:", self._proj_skip), ("N frames (0=all):", self._proj_nframes))
         projc.body.addLayout(pf)
@@ -751,6 +755,12 @@ class CalibrationTab(QtWidgets.QWidget):
         # _limits / _apply_limit_state) goes on working against them
         # unchanged.
         self._limit_widgets = self._param_table.limit_widgets
+        # Range widths: same precision as the Hydra panel (set before any
+        # value is restored so nothing is pre-rounded).
+        for _n, _d in {"Lsd": 1, "BC_y": 1, "BC_z": 1, "tx": 1, "ty": 1,
+                       "tz": 1, "wavelength_A": 3, "distortion": 3}.items():
+            if _n in self._limit_widgets:
+                self._limit_widgets[_n][1].setDecimals(_d)
         self._limit_name_lbls = self._param_table.limit_name_lbls
         self._limit_row_sub = self._param_table.limit_row_sub
         self._limit_row_cells = self._param_table.limit_row_cells
@@ -926,7 +936,11 @@ class CalibrationTab(QtWidgets.QWidget):
         mid_col = QtWidgets.QWidget()
         mid_v = QtWidgets.QVBoxLayout(mid_col); mid_v.setContentsMargins(0, 0, 0, 0); mid_v.setSpacing(0)
         mid_v.addWidget(scroll, 1)
-        mid_v.addWidget(footer)
+        footer.setMaximumWidth(400)
+        mid_col.setMaximumWidth(400 + 24)   # panel never wider than its content
+        frow = QtWidgets.QHBoxLayout(); frow.setContentsMargins(0, 0, 0, 0)
+        frow.addWidget(footer, 1000); frow.addStretch(1)
+        mid_v.addLayout(frow)
         split.addWidget(mid_col)
 
         # Right: image + bottom tabs

@@ -4835,9 +4835,14 @@ class DataLoaderPanel(QtWidgets.QWidget):
             # FILES combine when the source is TIFF-family, since each file
             # already is one raw frame with nothing smaller to group.
             self._combine_row = QtWidgets.QWidget()
-            cr = QtWidgets.QHBoxLayout(self._combine_row)
-            cr.setContentsMargins(0, 0, 0, 0); cr.setSpacing(4)
-            cr.addWidget(QtWidgets.QLabel("Combine sub-frames:"))
+            # Caption on its own line, controls beneath: one line made the
+            # card ~380 px minimum and clipped the path row's browse button
+            # when the Data panel was dragged narrow.
+            _cv = QtWidgets.QVBoxLayout(self._combine_row)
+            _cv.setContentsMargins(0, 0, 0, 0); _cv.setSpacing(2)
+            _cv.addWidget(QtWidgets.QLabel("Combine sub-frames:"))
+            cr = QtWidgets.QHBoxLayout(); cr.setSpacing(4)
+            _cv.addLayout(cr)
             self._combine_chunk = _NoScrollSpinBox()
             self._combine_chunk.setRange(0, 999999); self._combine_chunk.setFixedWidth(64)
             self._combine_chunk.setValue(1)

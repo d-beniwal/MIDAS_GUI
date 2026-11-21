@@ -188,7 +188,9 @@ class CalibrationParameterTable(QtWidgets.QWidget):
             lbl = QtWidgets.QLabel(text)
             lbl.setStyleSheet(f"color:{S.MUTED};font-size:9px")
             grid.addWidget(lbl, 0, col)
-        grid.setColumnStretch(3, 1)
+        # Spare width goes to an empty trailing column so the widgets stay
+        # packed at their natural size instead of drifting apart.
+        grid.setColumnStretch(6, 1)
 
         rows = {r[0]: (r[2], r[3], r[4], r[5]) for r in PARAMETER_LIMIT_ROWS}
         order = tuple(row[0] for row in PARAMETER_LIMIT_ROWS)

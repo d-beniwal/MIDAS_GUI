@@ -314,6 +314,12 @@ class PanelToggles(QtCore.QObject):
             if self._containers[k].minimumWidth() != m:
                 self._panel(k).setMinimumWidth(m)
                 self._containers[k].setMinimumWidth(m)
+            # A panel that caps its own width (content-sized Controls) must
+            # cap the header wrapper too, or the splitter still lets the
+            # handle be dragged past it and the header bar stretches.
+            pmax = self._panel(k).maximumWidth()
+            if self._containers[k].maximumWidth() != pmax:
+                self._containers[k].setMaximumWidth(pmax)
 
     def _refit_visible(self) -> None:
         if not self._split.isVisible() or not self._total():

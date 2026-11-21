@@ -381,6 +381,10 @@ class DataViewerTab(QtWidgets.QWidget):
         inner = QtWidgets.QWidget(); lv = QtWidgets.QVBoxLayout(inner)
         lv.setContentsMargins(2, 2, 2, 2); lv.setSpacing(8)
         scroll.setWidget(inner)
+        # Cap the content width so widening the panel leaves blank space
+        # instead of stretching every row; the panel itself never exceeds it.
+        inner.setMaximumWidth(400)
+        scroll.setMaximumWidth(400 + 24)
 
         def _br(w=30):
             b = QtWidgets.QPushButton("…"); b.setFixedWidth(w); return b

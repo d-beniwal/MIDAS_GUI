@@ -1413,7 +1413,7 @@ class BatchTab(QtWidgets.QWidget):
         # widgets.DataLoaderPanel's unify_combine docs. Pump Probe embeds the
         # same panel WITHOUT this flag and keeps the old stride behavior.
         self._loader = DataLoaderPanel(mode="stream", unify_combine=True)
-        self._loader.setMinimumWidth(200)
+        self._loader.setMinimumWidth(262)
         split.addWidget(self._loader)
 
         # ── MIDDLE: parameters ──
@@ -1422,6 +1422,8 @@ class BatchTab(QtWidgets.QWidget):
         inner = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(inner); lv.setContentsMargins(2, 2, 2, 2); lv.setSpacing(8)
         scroll.setWidget(inner)
+        # Cap the content width so widening the panel leaves blank space
+        # instead of stretching every row; the panel itself never exceeds it.
 
         def _br(w=30):
             b = QtWidgets.QPushButton("…"); b.setFixedWidth(w); return b
@@ -1901,6 +1903,11 @@ class BatchTab(QtWidgets.QWidget):
         self._prog_lbl = QtWidgets.QLabel(""); self._prog_lbl.setStyleSheet(f"font-size:10px;color:{S.MUTED}")
         lv.addWidget(self._prog_lbl)
         lv.addStretch(1)
+        # Cap at the width the cards need (+ a little): widening the panel
+        # leaves blank space instead of stretching every row.
+        _cap = max(400, inner.minimumSizeHint().width() + 8)
+        inner.setMaximumWidth(_cap)
+        scroll.setMaximumWidth(_cap + 24)
         split.addWidget(scroll)
 
         # Right: waterfall / stacked-profiles / detector-view / logs tabs

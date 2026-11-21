@@ -235,6 +235,8 @@ class HydraBatchPage(QtWidgets.QWidget):
         inner = QtWidgets.QWidget()
         lv = QtWidgets.QVBoxLayout(inner); lv.setContentsMargins(2, 2, 2, 2); lv.setSpacing(8)
         scroll.setWidget(inner)
+        # Cap the content width so widening the panel leaves blank space
+        # instead of stretching every row; the panel itself never exceeds it.
 
         # Integration (shared)
         integ = S.make_card("Integration  (shared across ge1–ge4)")
@@ -693,6 +695,11 @@ class HydraBatchPage(QtWidgets.QWidget):
         lv.addWidget(self._card_stack)
         self._place_shared_cake_widgets(self._cards[1])
         lv.addStretch(1)
+        # Cap at the width the cards need (+ a little): widening the panel
+        # leaves blank space instead of stretching every row.
+        _cap = max(400, inner.minimumSizeHint().width() + 8)
+        inner.setMaximumWidth(_cap)
+        scroll.setMaximumWidth(_cap + 24)
         split.addWidget(scroll)
 
         # ── RIGHT: per-panel Waterfall/Stacked-profiles (switched with the
