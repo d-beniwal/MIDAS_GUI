@@ -1,8 +1,10 @@
 # Project state
 
-Last updated: 2026-11-20 (Hydra Calibrate: shared transforms, ge buttons, defaults)
+Last updated: 2026-11-20 (proportional default panel widths)
 
 ## Now working on
+
+2026-11-20 (latest): **Panel widths are now proportional by default** (Data 14 %, Controls 27 %, Results keeps >=48 %; remembered as fractions under `layout2/`, old pixel keys ignored; DECISIONS 2026-11-20). Uncommitted on `hydra_ui`; offscreen-checked, not on cocoa. Window minimum width fixed too (was 1760 px from the Zarr Viewer's control rows, now 1185 px; DECISIONS follow-up).
 
 2026-11-20 (later): **Hydra Calibrate tweaks** — pixel 200 µm on all Hydra pages, one shared Transforms row, `?` help popup in the Controls header (banner gone), range decimals, Parallel default, ge1-ge4 buttons + "All same" in Parameters, Distortion/Residual map off by default (DECISIONS 2026-11-20 step 4). Uncommitted on `hydra_ui`; offscreen-checked only. Hydra Integrate still next.
 

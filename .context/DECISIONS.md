@@ -3,6 +3,19 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-20 — Panel widths: proportional defaults, shares not pixels (`panel_toggle.py`)
+
+Symptom: on launch some tabs (Hydra Data Viewer / Batch especially) gave Controls ~45 % of the window and squeezed/clipped Results. Causes: (1) widths were applied in `PanelToggles.__init__`, before the splitter had a real width; (2) remembered widths were absolute pixels in per-machine QSettings, so a stale/oversized value (Hydra view 678, Hydra batch 730) re-applied forever and never transferred across screens; (3) content-fit minimums (up to 520 px) were not bounded by window size.
+
+Decision (implemented once, in the shared helper, so every tab and every user gets it with a `git pull`):
+- Widths are applied by the first timer tick after the splitter is visible and >=600 px wide (`_applied`).
+- Defaults are shares of the splitter width: Data 14 %, Controls 27 %. Content-fit minimum still raises a panel, but is capped at 22 % (Data) / 30 % (Controls) of the width, so Results keeps >=48 %. Hard tab minimums (`setMinimumWidth`) still win on very narrow windows.
+- Remembered widths are stored as fractions under `layout2/<tab>/<panel>_frac`, clamped to the same caps. The old `layout/<tab>/*_width` pixel keys are ignored (deliberately: they were the source of the bad layouts).
+- Tradeoff: if a panel's content is wider than its cap it gets a horizontal scrollbar rather than stealing plot space.
+Tests: `tests/test_panel_toggle_tabs.py` (proportions at 1100/1600/2400 px, stale legacy value ignored). Offscreen-checked on Hydra pages; not hand-checked on cocoa. 
+
+**Follow-up, same day - window minimum width (fixed).** The main window's minimum was 1760 px (clipping Results on a 1440 px laptop). Cause: the Zarr Viewer tab's three one-row group boxes (Display controls ~1629 px of side-by-side widgets); a QTabWidget's minimum is the max over all pages. Fix: `tab_zarrviewer._scrolling_row()` puts each row in a horizontal scroll area (scrolls instead of constraining the window). Window minimum is now 1185 px (next largest: Batch Queue 1181, Mask Builder ~1000). Rule for new tabs: never put a long fixed row of controls straight in a layout; the widest tab sets the window minimum.
+
 ## 2026-11-20 (hydra_ui, step 4) — Hydra Calibrate: one Transforms row, ge buttons + All same, defaults
 
 Branch `hydra_ui`, uncommitted. Seven requested changes:

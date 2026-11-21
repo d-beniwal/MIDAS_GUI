@@ -27,8 +27,20 @@ _TITLES = {DATA: "Data", CONTROLS: "Controls"}
 # Layout persistence / content-fit tuning.
 _SETTINGS_ORG, _SETTINGS_APP = "MIDAS", "midas-gui"
 _MAX_AUTO_MIN = 520      # content-derived minimum width never exceeds this (px)
-_MAX_SCREEN_FRAC = 0.45  # a saved panel width never exceeds this share of the screen
 _REFIT_MS = 1000         # how often content-derived minimums are re-checked
+
+# Default proportions (share of the splitter width).  Every launch, on every
+# machine, starts from these, so Results (the plots) always keeps the largest
+# share: Data ~14 %, Controls ~27 %, Results the rest (~59 %).  A panel's width
+# may grow to fit its content, but never past the cap share, so Results keeps
+# at least ~48 % however long a panel's rows are.
+_DEFAULT_FRAC = {DATA: 0.14, CONTROLS: 0.27}
+_CAP_FRAC = {DATA: 0.22, CONTROLS: 0.30}
+_MIN_TOTAL = 600         # ignore a splitter narrower than this (not laid out yet)
+# Remembered widths are stored as a share of the splitter width (portable
+# across screens/OSes).  "v2" drops the older absolute-pixel values, which
+# could be stale or oversized.
+_SKEY_VERSION = "layout2"
 
 
 def _settings() -> QtCore.QSettings:
@@ -131,10 +143,12 @@ class PanelToggles(QtCore.QObject):
         # timer while the tab is on screen.  (Deliberately no Python
         # eventFilter on the panels: one called during widget teardown
         # segfaulted the Hydra tests.)
+        # The splitter has no real width until it is shown, so the proportional
+        # widths are applied by the first timer tick after it is visible.
+        self._applied = False
         self._refit_all()
-        self._restore_widths()
         self._fit_timer = QtCore.QTimer(self)
-        self._fit_timer.setInterval(_REFIT_MS)
+        self._fit_timer.setInterval(40)
         self._fit_timer.timeout.connect(self._refit_visible)
         self._fit_timer.start()
         self._save_timer = QtCore.QTimer(self)
@@ -276,12 +290,23 @@ class PanelToggles(QtCore.QObject):
         """The real panel inside a key's header wrapper."""
         return self._containers[key].layout().itemAt(1).widget()
 
+    def _total(self) -> int:
+        """Splitter width, or 0 if it has not been laid out yet."""
+        w = self._split.width()
+        return w if w >= _MIN_TOTAL else 0
+
     def _auto_min(self, key: str) -> int:
-        return max(self._base_min[key],
-                   min(_content_width(self._panel(key)), _MAX_AUTO_MIN))
+        cap = _MAX_AUTO_MIN
+        total = self._total()
+        if total:
+            cap = min(cap, int(_CAP_FRAC[key] * total))
+        return max(self._base_min[key], min(_content_width(self._panel(key)), cap))
 
     def _default_for(self, key: str) -> int:
-        return max(self._defaults[key], self._auto_min(key))
+        total = self._total()
+        if not total:
+            return max(self._defaults[key], self._auto_min(key))
+        return max(int(_DEFAULT_FRAC[key] * total), self._auto_min(key))
 
     def _refit_all(self) -> None:
         for k in self._idx:
@@ -291,26 +316,34 @@ class PanelToggles(QtCore.QObject):
                 self._containers[k].setMinimumWidth(m)
 
     def _refit_visible(self) -> None:
-        if self._split.isVisible():
-            self._refit_all()
+        if not self._split.isVisible() or not self._total():
+            return
+        self._refit_all()
+        if not self._applied:
+            self._applied = True
+            self._restore_widths()
+            self._fit_timer.setInterval(_REFIT_MS)
 
     def _skey(self, key: str) -> str:
-        return f"layout/{self._key}/{key}_width"
+        return f"{_SKEY_VERSION}/{self._key}/{key}_frac"
 
     def _restore_widths(self) -> None:
         sizes = list(self._split.sizes())
         r = self._results_idx
-        cap = int(_MAX_SCREEN_FRAC * self._screen_width())
+        total = self._total() or sum(sizes)
         s = _settings() if self._key else None
         for k, i in self._idx.items():
+            if self._minimized[k]:
+                continue
             w = self._default_for(k)
             if s is not None:
                 try:
-                    saved = int(s.value(self._skey(k), 0) or 0)
+                    frac = float(s.value(self._skey(k), 0) or 0)
                 except (TypeError, ValueError):
-                    saved = 0
-                if saved > 0:
-                    w = max(self._auto_min(k), min(saved, cap))
+                    frac = 0.0
+                if frac > 0:
+                    w = max(self._auto_min(k), min(int(frac * total),
+                                                   int(_CAP_FRAC[k] * total)))
             sizes[r] += sizes[i] - w; sizes[i] = w
         self._split.setSizes(sizes)
 
@@ -319,14 +352,12 @@ class PanelToggles(QtCore.QObject):
             return
         s = _settings()
         sizes = self._split.sizes()
+        total = self._total() or sum(sizes)
+        if not total:
+            return
         for k, i in self._idx.items():
             if not self._minimized[k] and sizes[i] > 0:
-                s.setValue(self._skey(k), int(sizes[i]))
-
-    @staticmethod
-    def _screen_width() -> int:
-        scr = QtWidgets.QApplication.primaryScreen()
-        return scr.availableGeometry().width() if scr is not None else 1920
+                s.setValue(self._skey(k), round(sizes[i] / total, 4))
 
     def _default_width(self, i: int) -> int:
         for k, idx in self._idx.items():

@@ -213,6 +213,35 @@ def _unwrap_eta(y):
     return y, False       # not an angle wrap; leave it and let mpl warn
 
 
+def _scrolling_row(box: "QtWidgets.QGroupBox"):
+    """Give a group box a one-row layout that scrolls sideways when narrow.
+
+    A plain QHBoxLayout of many controls reports a minimum width equal to the
+    sum of them all (~1600 px here), which becomes the whole window's minimum
+    width.  Inside a horizontal scroll area the row keeps its natural layout
+    but no longer constrains the window.  Returns ``(row_layout, fit)``; call
+    ``fit()`` once every widget has been added to size the strip's height.
+    """
+    outer = QtWidgets.QVBoxLayout(box)
+    outer.setContentsMargins(4, 4, 4, 2)
+    area = QtWidgets.QScrollArea()
+    area.setFrameShape(QtWidgets.QFrame.NoFrame)
+    area.setWidgetResizable(True)
+    area.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+    area.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+    inner = QtWidgets.QWidget()
+    row = QtWidgets.QHBoxLayout(inner)
+    row.setContentsMargins(0, 0, 0, 0)
+    area.setWidget(inner)
+    area.setMinimumWidth(120)
+    outer.addWidget(area)
+
+    def fit():
+        area.setFixedHeight(inner.sizeHint().height()
+                            + area.horizontalScrollBar().sizeHint().height() + 2)
+    return row, fit
+
+
 class PlotCanvas(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -499,7 +528,7 @@ class ZarrViewerTab(QtWidgets.QWidget):
 
         # Controls row
         ctrl_box = QtWidgets.QGroupBox("Display controls")
-        ctrl_layout = QtWidgets.QHBoxLayout(ctrl_box)
+        ctrl_layout, _ctrl_box_fit = _scrolling_row(ctrl_box)
 
         ctrl_layout.addWidget(QtWidgets.QLabel("Colormap:"))
         self._cmap_cb = QtWidgets.QComboBox()
@@ -599,11 +628,12 @@ class ZarrViewerTab(QtWidgets.QWidget):
         ctrl_layout.addWidget(btn_replot)
 
         ctrl_layout.addStretch()
+        _ctrl_box_fit()
         right_layout.addWidget(ctrl_box)
 
         # ── 1-D line plot controls (integration arrays) ───────────────────
         line_box = QtWidgets.QGroupBox("1-D plot (integration arrays)")
-        line_layout = QtWidgets.QHBoxLayout(line_box)
+        line_layout, _line_box_fit = _scrolling_row(line_box)
 
         line_layout.addWidget(QtWidgets.QLabel("Plot mode:"))
         self._plot_mode_cb = QtWidgets.QComboBox()
@@ -632,11 +662,12 @@ class ZarrViewerTab(QtWidgets.QWidget):
         lbl_eta_hint.setStyleSheet(f"color: {S.MUTED};")
         line_layout.addWidget(lbl_eta_hint)
 
+        _line_box_fit()
         right_layout.addWidget(line_box)
 
         # Slice selector (for 3-D arrays)
         slice_box = QtWidgets.QGroupBox("Slice selector (3-D arrays)")
-        slice_layout = QtWidgets.QHBoxLayout(slice_box)
+        slice_layout, _slice_box_fit = _scrolling_row(slice_box)
         self._slice_lbl = QtWidgets.QLabel("axis-0 index:")
         self._slice_spin = QtWidgets.QSpinBox()
         self._slice_spin.setMinimum(1)
@@ -648,6 +679,7 @@ class ZarrViewerTab(QtWidgets.QWidget):
         slice_layout.addWidget(self._slice_spin)
         slice_layout.addWidget(self._slice_count_lbl)
         slice_layout.addStretch(1)
+        _slice_box_fit()
         right_layout.addWidget(slice_box)
 
         # Metadata / attributes panel — h5web-style: tree of attribute

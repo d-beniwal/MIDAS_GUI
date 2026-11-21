@@ -44,11 +44,18 @@ def _toggles(tab, key):
     return split, split.panel_toggles
 
 
+def _applied(app, pt):
+    """Wait for the first proportional layout (applied once the tab is shown)."""
+    _wait_until(app, lambda: pt._applied)
+    app.processEvents()
+
+
 @pytest.mark.parametrize("name", ["view", "calibrate", "batch", "pumpprobe"])
 def test_minimize_restore(app, name):
     tab = _make(name)
     tab.resize(1600, 900); tab.show(); app.processEvents()
     split, pt = _toggles(tab, name)
+    _applied(app, pt)
     before = split.sizes()
     pt.set_minimized("data", True); pt.set_minimized("controls", True); app.processEvents()
     s = split.sizes()
@@ -66,9 +73,6 @@ def test_minimize_restore(app, name):
 def isolated_settings(tmp_path, monkeypatch):
     from PyQt5 import QtCore
     from midas_gui import panel_toggle
-    # The offscreen screen is tiny; don't let the 45%-of-screen cap clamp widths.
-    monkeypatch.setattr(panel_toggle.PanelToggles, "_screen_width",
-                        staticmethod(lambda: 4000))
     QtCore.QSettings.setDefaultFormat(QtCore.QSettings.IniFormat)
     QtCore.QSettings.setPath(QtCore.QSettings.IniFormat, QtCore.QSettings.UserScope,
                              str(tmp_path))
@@ -81,8 +85,9 @@ def test_widths_persist_and_reset(app, isolated_settings):
     tab = _make("calibrate")
     tab.resize(1600, 900); tab.show(); app.processEvents()
     split, pt = _toggles(tab, "calibrate")
-    default = split.sizes()[1]
-    sizes = split.sizes(); sizes[1] += 90; sizes[2] -= 90
+    _applied(app, pt)
+    assert split.sizes()[1] - 40 >= pt._auto_min("controls")
+    sizes = split.sizes(); sizes[1] -= 40; sizes[2] += 40
     split.setSizes(sizes); app.processEvents()
     pt._save_widths()
     wide = split.sizes()[1]
@@ -91,9 +96,10 @@ def test_widths_persist_and_reset(app, isolated_settings):
     tab2 = _make("calibrate")                       # fresh tab = new session
     tab2.resize(1600, 900); tab2.show(); app.processEvents()
     split2, pt2 = _toggles(tab2, "calibrate")
+    _applied(app, pt2)
     assert abs(split2.sizes()[1] - wide) <= 2
     pt2.reset_widths(); app.processEvents()
-    assert abs(split2.sizes()[1] - default) <= 2
+    assert abs(split2.sizes()[1] - pt2._default_for("controls")) <= 2
     tab2.deleteLater(); app.processEvents()
 
 
@@ -101,8 +107,8 @@ def test_controls_minimum_follows_content(app, isolated_settings):
     tab = _make("batch")
     tab.resize(1600, 900); tab.show(); app.processEvents()
     split, pt = _toggles(tab, "batch")
-    from midas_gui.panel_toggle import _content_width, _MAX_AUTO_MIN
-    need = min(_content_width(pt._panel("controls")), _MAX_AUTO_MIN)
+    _applied(app, pt)
+    need = pt._auto_min("controls")      # content width, capped by window share
     assert split.sizes()[1] >= need
     assert pt._containers["controls"].minimumWidth() >= need
     tab.deleteLater(); app.processEvents()
@@ -123,8 +129,8 @@ def test_hydra_minimize_restore_and_persist(app, isolated_settings, name):
     page = _make_hydra(name)
     page.resize(1600, 900); page.show(); _settle(app)
     split, pt = _toggles(page, name)
-    from midas_gui.panel_toggle import _content_width, _MAX_AUTO_MIN
-    need = min(_content_width(pt._panel("controls")), _MAX_AUTO_MIN)
+    _applied(app, pt)
+    need = pt._auto_min("controls")
     # PanelToggles re-checks content width on a 1 s timer while visible, and
     # some Hydra pages widen after first layout, so wait on the condition
     # (bounded) instead of a fixed number of event-loop passes.
@@ -141,13 +147,46 @@ def test_hydra_minimize_restore_and_persist(app, isolated_settings, name):
     assert abs(after[0] - before[0]) <= 2 and abs(after[1] - before[1]) <= 2
     assert not pt.ribbon.isVisible()
 
-    sizes = split.sizes(); sizes[1] += 70; sizes[2] -= 70
+    sizes = split.sizes(); sizes[1] -= 30; sizes[2] += 30
     split.setSizes(sizes); app.processEvents()
     pt._save_widths(); wide = split.sizes()[1]
     page.deleteLater(); app.processEvents()
 
     page2 = _make_hydra(name)
     page2.resize(1600, 900); page2.show(); _settle(app)
-    split2, _ = _toggles(page2, name)
+    split2, pt2 = _toggles(page2, name)
+    _applied(app, pt2)
     assert abs(split2.sizes()[1] - wide) <= 2
     page2.deleteLater(); app.processEvents()
+
+
+@pytest.mark.parametrize("width", [1100, 1600, 2400])
+@pytest.mark.parametrize("name", ["view", "calibrate", "batch"])
+def test_default_proportions_keep_results_large(app, isolated_settings, name, width):
+    """Whatever the window width (and whatever any panel's content wants),
+    a fresh launch gives Results the largest share and Data/Controls stay
+    within their caps."""
+    from midas_gui.panel_toggle import _CAP_FRAC
+    tab = _make(name)
+    tab.resize(width, 900); tab.show(); app.processEvents()
+    split, pt = _toggles(tab, name)
+    _applied(app, pt)
+    d, c, r = split.sizes()
+    total = split.width()
+    assert r >= 0.45 * total, (d, c, r)
+    assert d <= _CAP_FRAC["data"] * total + 2
+    assert c <= _CAP_FRAC["controls"] * total + 2
+    tab.deleteLater(); app.processEvents()
+
+
+def test_stale_absolute_pixel_settings_are_ignored(app, isolated_settings):
+    from PyQt5 import QtCore
+    s = QtCore.QSettings("MIDAS", "midas-gui")
+    s.setValue("layout/calibrate/controls_width", 1500)   # legacy oversized value
+    tab = _make("calibrate")
+    tab.resize(1600, 900); tab.show(); app.processEvents()
+    split, pt = _toggles(tab, "calibrate")
+    _applied(app, pt)
+    d, c, r = split.sizes()
+    assert r >= 0.45 * split.width()
+    tab.deleteLater(); app.processEvents()
