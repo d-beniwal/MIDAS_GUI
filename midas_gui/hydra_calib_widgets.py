@@ -316,7 +316,32 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
                 manual[key] = w.value()
         return manual or None
 
+    def _couple_bc_lsd(self):
+        """Beam centre and Lsd are one seed choice: BC without Lsd (or the
+        reverse) is a known-bad, near-degenerate combination. Whichever tick
+        the user just flipped drags the other with it; with no sender (a
+        signal-blocked restore, a programmatic call) any mismatch resolves to
+        both ON so a half-seeded geometry can never survive."""
+        if getattr(self, "_coupling_bc_lsd", False):
+            return
+        bc, lsd = self._seed_en_bc, self._seed_en_lsd
+        if bc.isChecked() == lsd.isChecked():
+            return
+        src = self.sender()
+        if src is bc:
+            want, dst = bc.isChecked(), lsd
+        elif src is lsd:
+            want, dst = lsd.isChecked(), bc
+        else:
+            want, dst = True, (lsd if bc.isChecked() else bc)
+        self._coupling_bc_lsd = True
+        try:
+            dst.setChecked(want)
+        finally:
+            self._coupling_bc_lsd = False
+
     def _on_seed_enable_changed(self, *_args):
+        self._couple_bc_lsd()
         self._syncing_seed_master = True
         try:
             n_on = sum(cb.isChecked() for cb in self._seed_enables)

@@ -348,7 +348,13 @@ class CalibrationParameterTable(QtWidgets.QWidget):
         for key, (row, col) in self._seed_cells.items():
             incoming = new.get(key)
             outgoing = self._seed_widgets.get(key)
-            if incoming is None or incoming is outgoing:
+            if incoming is None:
+                continue
+            if incoming is outgoing:
+                # Already placed (first bind on the page, same owner): it may
+                # still be hidden from an earlier rebind or its owner's page,
+                # so make sure it is visible.
+                incoming.show()
                 continue
             if outgoing is not None:
                 self.grid.removeWidget(outgoing)

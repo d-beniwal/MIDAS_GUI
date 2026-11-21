@@ -605,7 +605,7 @@ class DataViewerTab(QtWidgets.QWidget):
         ptb.insertWidget(2, prof_src_sep)
         self._rad_r_bin = _fspin(0.1, 20.0, 2, 1.0, "px"); self._rad_r_bin.setFixedWidth(56)
         self._rad_r_bin.setToolTip("Radial bin size for the azimuthal mean.")
-        self._rad_auto = QtWidgets.QCheckBox("Auto"); self._rad_auto.setChecked(True)
+        self._rad_auto = QtWidgets.QCheckBox("Auto")   # off by default
         self._rad_auto.setToolTip("Recompute the radial integration when the beam "
                                   "centre or frame changes.")
         self._rad_accurate = QtWidgets.QCheckBox("Accurate")
@@ -615,9 +615,19 @@ class DataViewerTab(QtWidgets.QWidget):
             "properly accounted for.\n"
             "Off (the default) uses the fast approximate profile, which ignores "
             "some of those but is quick enough to keep up with the live view.")
+        # Auto and Accurate are mutually exclusive (both start unticked):
+        # Accurate runs the heavy engine pipeline on demand via Integrate, so
+        # it must not also re-fire on every beam-centre / frame change.
+        # Connected before the geometry card's own toggled handlers so the
+        # partner is already clear when they read the pair.
+        self._rad_auto.toggled.connect(
+            lambda on: on and self._rad_accurate.setChecked(False))
+        self._rad_accurate.toggled.connect(
+            lambda on: on and self._rad_auto.setChecked(False))
         self._geom_card.set_radial_controls(self._rad_r_bin, self._rad_auto,
                                             self._rad_accurate)
         self._rad_btn = QtWidgets.QPushButton("Integrate")
+        self._rad_btn.setObjectName("primary")   # accent colour: clickable action
         self._rad_btn.clicked.connect(self._geom_card.radial_integrate)
         ptb.insertWidget(3, self._rad_btn)
         ptb.insertWidget(3, self._rad_auto)
