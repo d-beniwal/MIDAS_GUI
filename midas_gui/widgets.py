@@ -346,7 +346,7 @@ class ImageViewer(QtWidgets.QWidget):
         incoming frames until the user chooses to move it."""
         self._data = data.astype(np.float32)
         if reset_levels:
-            self._color_scale.reset(preserve_restored=True)
+            self._color_scale.reset(preserve_restored=True, keep_user=True)
         self._redisplay()
         self._apply_view_limits(data.shape[1], data.shape[0])
         if autorange:
@@ -6983,7 +6983,7 @@ class WaterfallViewer(QtWidgets.QWidget):
         self._nrows = 0
         self._r_axis = None if r_axis is None else np.asarray(r_axis, dtype=float)
         self._img.clear()
-        self._color_scale.reset()
+        self._color_scale.reset(keep_user=True)
         self._stat.setText("")
 
     def add_profile(self, profile):

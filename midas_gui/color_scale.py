@@ -123,8 +123,14 @@ class ColorScaleControls(QtWidgets.QWidget):
         hi = float(round(hi))
         return lo, max(hi, lo + 1.0)
 
-    def reset(self, preserve_restored=False):
+    def reset(self, preserve_restored=False, keep_user=False):
+        """Back to auto limits. ``keep_user=True`` is for programmatic resets
+        (new frame/dataset/panel): a range the user typed or a slider contrast
+        they set is never changed by anything but the user (Reset button, or
+        editing the fields)."""
         if preserve_restored and self._restored_pending:
+            return
+        if keep_user and (self.manual_limits is not None or self.contrast is not None):
             return
         self._restored_pending = False
         self.manual_limits = None
