@@ -81,6 +81,12 @@ _SEED_VALUE_FOR = {
 }
 
 
+_DIST_BTN_QSS = (
+    "QPushButton{padding:2px 8px;border:1px solid #2e6fd0;"
+    "border-radius:4px;background:#e8f0fc;color:#1a4fa0;font-weight:600;}"
+    "QPushButton:hover{background:#d0e2fa;}"
+    "QPushButton:pressed{background:#b8d2f5;}")
+
 class CalibrationParameterTable(QtWidgets.QWidget):
     """The merged seed/refine/limits grid.
 
@@ -206,10 +212,9 @@ class CalibrationParameterTable(QtWidgets.QWidget):
             tick_key = _SEED_TICK_FOR.get(name)
 
             if name == "distortion":
-                lbl0 = QtWidgets.QPushButton(_NAME[name])
-                lbl0.setFlat(True)
+                lbl0 = QtWidgets.QPushButton(_NAME[name] + " ▸")
                 lbl0.setCursor(QtCore.Qt.PointingHandCursor)
-                lbl0.setStyleSheet("text-align:left;padding:0;border:none;")
+                lbl0.setStyleSheet(_DIST_BTN_QSS)
                 lbl0.setToolTip("Click to choose which distortion "
                                 "coefficients to refine.")
                 if on_distortion_clicked is not None:
@@ -397,5 +402,5 @@ class CalibrationParameterTable(QtWidgets.QWidget):
                 f"color:{REFINED_COLOR};" if refined else "")
             if name == "distortion":
                 w.setStyleSheet(
-                    "text-align:left;padding:0;border:none;"
-                    + (f"color:{REFINED_COLOR};" if refined else ""))
+                    _DIST_BTN_QSS
+                    + (f"QPushButton{{color:{REFINED_COLOR};}}" if refined else ""))
