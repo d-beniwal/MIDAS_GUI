@@ -476,6 +476,71 @@ def make_card(title: str) -> QtWidgets.QGroupBox:
     return gb
 
 
+class _HelpPopup(QtWidgets.QFrame):
+    """Click-to-open text bubble; closes on any click outside it."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent, QtCore.Qt.Popup)
+        self.setFrameShape(QtWidgets.QFrame.StyledPanel)
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 8)
+        self.label = QtWidgets.QLabel()
+        self.label.setWordWrap(True)
+        self.label.setTextFormat(QtCore.Qt.RichText)
+        self.label.setFixedWidth(360)
+        lay.addWidget(self.label)
+
+
+class _HelpPlacer(QtCore.QObject):
+    """Keeps a card's "?" button pinned to the right end of its title line."""
+
+    def __init__(self, card, btn):
+        super().__init__(card)
+        self._card, self._btn = card, btn
+        card.installEventFilter(self)
+        self.place()
+
+    def place(self):
+        b, c = self._btn, self._card
+        b.move(c.width() - b.width() - 8, 0)
+        b.raise_()
+
+    def eventFilter(self, obj, ev):
+        if ev.type() in (QtCore.QEvent.Resize, QtCore.QEvent.Show):
+            self.place()
+        return False
+
+
+def add_help_button(card: QtWidgets.QGroupBox, html_source) -> QtWidgets.QToolButton:
+    """Put a "?" button on ``card``'s title line; clicking it pops up help text.
+
+    ``html_source`` is a string or a zero-arg callable returning one (called on
+    each click, so the text can follow state such as the selected panel).
+    """
+    btn = QtWidgets.QToolButton(card)
+    btn.setText("?")
+    btn.setCursor(QtCore.Qt.PointingHandCursor)
+    btn.setToolTip("What do Seed, Refine and Limits mean?")
+    btn.setFixedSize(18, 18)
+    btn.setStyleSheet(
+        f"QToolButton{{border:1px solid {MUTED};border-radius:9px;"
+        f"color:{MUTED};font-weight:bold;font-size:11px;background:transparent;}}"
+        f"QToolButton:hover{{color:{ACCENT};border-color:{ACCENT};}}")
+    pop = _HelpPopup(card)
+
+    def _show():
+        html = html_source() if callable(html_source) else html_source
+        pop.label.setText(html)
+        pop.adjustSize()
+        pop.move(btn.mapToGlobal(QtCore.QPoint(btn.width() - pop.width(), btn.height() + 2)))
+        pop.show()
+
+    btn.clicked.connect(_show)
+    card._help_placer = _HelpPlacer(card, btn)   # type: ignore[attr-defined]
+    card.help_button = btn                       # type: ignore[attr-defined]
+    return btn
+
+
 def primary_btn(text: str) -> QtWidgets.QPushButton:
     """A prominent accent (orange) action button."""
     b = QtWidgets.QPushButton(text)

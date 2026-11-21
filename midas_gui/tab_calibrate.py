@@ -771,6 +771,7 @@ class CalibrationTab(QtWidgets.QWidget):
         self._ref_dist.toggled.connect(lambda _=0: self._update_dist_label())
         self._ref_dist.toggled.connect(self._on_refine_flags_changed)
         refc.body.addWidget(self._param_table)
+        S.add_help_button(refc, lambda: self._param_table.help_html())
         refc.body.addLayout(rfl_bottom)
         refc.body.addWidget(self._seed_summary_lbl)
         refc.body.addWidget(self._seed_bc_lsd_warn)

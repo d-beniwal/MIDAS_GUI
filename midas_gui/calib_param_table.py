@@ -152,6 +152,8 @@ class CalibrationParameterTable(QtWidgets.QWidget):
             "it to a measured value -- which on a Hydra panel is exactly "
             "what tx is for.")
         hint.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:2px;")
+        # Shown in the card's "?" popup (see help_html), not inline.
+        hint.setVisible(False)
         outer.addWidget(hint)
         self._hint = hint
 
@@ -160,6 +162,7 @@ class CalibrationParameterTable(QtWidgets.QWidget):
         self._limits_hdr = QtWidgets.QLabel("")
         self._limits_hdr.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._limits_hdr.setWordWrap(True)
+        self._limits_hdr.setVisible(False)       # shown in the "?" popup
         outer.addWidget(self._limits_hdr)
 
         #: The backend re-centres every window on each E-M iterate, so the ±
@@ -320,6 +323,12 @@ class CalibrationParameterTable(QtWidgets.QWidget):
         lbl.setVisible(bool(lbl.text()))
 
     # ── one table, several owners ───────────────────────────────────
+
+    def help_html(self) -> str:
+        """Seed / Refine / Limits explanation, for the card's "?" popup."""
+        import html as _h
+        return (f"<p>{_h.escape(self._hint.text())}</p>"
+                f"<p>{_h.escape(self._limits_hdr.text())}</p>")
 
     def rebind_seed(self, seed_ticks: Mapping, seed_values: Mapping, owner=None):
         """Show a different owner's seed widgets in the same cells.

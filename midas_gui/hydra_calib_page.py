@@ -502,6 +502,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._all_same.toggled.connect(self._on_all_same_toggled)
         _prow.addSpacing(8); _prow.addWidget(self._all_same); _prow.addStretch(1)
         refc.body.addLayout(_prow)
+        self._panel_hdr.setVisible(False)    # text is shown in the card's "?" popup
         refc.body.addWidget(self._panel_hdr)
         self._ref_lsd = QtWidgets.QCheckBox("Lsd"); self._ref_lsd.setChecked(True)
         self._ref_bc = QtWidgets.QCheckBox("BC"); self._ref_bc.setChecked(True)
@@ -608,6 +609,8 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                 if _idx >= 0:
                     _combo.setCurrentIndex(_idx)
         refc.body.addWidget(self._param_table)
+        S.add_help_button(refc, lambda: f"<p>{self._panel_hdr.text()}</p>"
+                                        + self._param_table.help_html())
         refc.body.addWidget(self._build_rc)
         refc.body.addWidget(self._seed_status_lbl)
         refc.body.addWidget(self._card_stack)
