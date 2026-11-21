@@ -52,16 +52,6 @@ from midas_gui import settings
 from midas_gui import style as S
 
 
-def _collapse_when_unchecked(grp):
-    """Checkable QGroupBox whose body is hidden until the box is ticked."""
-    def _apply(on):
-        for w in grp.findChildren(QtWidgets.QWidget):
-            if w.parent() is grp:
-                w.setVisible(bool(on))
-    grp.toggled.connect(_apply)
-    _apply(grp.isChecked())
-
-
 class CalibrationTab(QtWidgets.QWidget):
     calibrationDone = QtCore.pyqtSignal(object)   # AutoCalibrationResult
     pullGeometry = QtCore.pyqtSignal()            # request geometry from Data Viewer
@@ -836,7 +826,7 @@ class CalibrationTab(QtWidgets.QWidget):
         av.addLayout(device_row)
         lv.addWidget(grp_adv)
         self._adv_grp = grp_adv
-        _collapse_when_unchecked(grp_adv)
+        S.collapse_when_unchecked(grp_adv)
 
         # ── Multi-panel ──
         grp_panel = QtWidgets.QGroupBox("Multi-panel detector")
@@ -868,7 +858,7 @@ class CalibrationTab(QtWidgets.QWidget):
         pf2.setColumnStretch(4, 1)
         pv.addLayout(pf2)
         self._panel_grp = grp_panel
-        _collapse_when_unchecked(grp_panel)
+        S.collapse_when_unchecked(grp_panel)
         lv.addWidget(grp_panel)
 
         lv.addStretch(1)

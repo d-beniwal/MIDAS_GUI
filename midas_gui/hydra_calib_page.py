@@ -640,6 +640,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         av.addLayout(S.Form().row(("E-M iters:", self._n_iter), ("LM iters:", self._lm_iter)))
         av.addLayout(S.Form().row(("Device:", self._device)))
         lv.addWidget(grp_adv)
+        S.collapse_when_unchecked(grp_adv)
         lv.addStretch(1)
 
         # ── Working dir / Run / Save — a fixed footer, not part of the

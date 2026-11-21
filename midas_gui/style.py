@@ -603,3 +603,13 @@ def button_grid(buttons, cols: int = 2) -> QtWidgets.QGridLayout:
 
 # Resolve the theme at import so module-level uses of S.* see the right colours.
 set_mode(configured_mode())
+
+
+def collapse_when_unchecked(grp):
+    """Checkable QGroupBox whose body is hidden until the box is ticked."""
+    def _apply(on):
+        for w in grp.findChildren(QtWidgets.QWidget):
+            if w.parent() is grp:
+                w.setVisible(bool(on))
+    grp.toggled.connect(_apply)
+    _apply(grp.isChecked())
