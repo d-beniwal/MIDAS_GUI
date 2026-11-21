@@ -332,19 +332,31 @@ def test_hydra_calib_page_wiring_and_pick_isolation(app, fixture_available, tmp_
     assert page2._limit_widgets["Lsd"][0].value() == pytest.approx(5.0)
     assert page2._limit_widgets["BC_y"][1].currentText() == "%"
 
-    # Positioning: the per-panel card stack (Transforms + Initial seed) sits
-    # before Refine parameters in the scrollable column — mirroring where
-    # tab_calibrate.CalibrationTab's own "Initial seed" card sits, not after
-    # Run (see .context/DECISIONS.md). Also confirms Working dir/Run/Save
-    # are NOT in the scrollable column at all (they're in the fixed footer).
+    # Positioning: same column order as single-detector Calibrate -- Pipeline,
+    # Define experiment (Transforms live there), Threshold, Projection, then ONE
+    # "Parameters" card holding the table and the per-panel seed footer stack.
+    # Also confirms Working dir/Run/Save are NOT in the scrollable column at
+    # all (they're in the fixed footer).
     scroll = page.findChild(QtWidgets.QScrollArea)
     widgets = [scroll.widget().layout().itemAt(i).widget()
               for i in range(scroll.widget().layout().count())]
     widgets = [w for w in widgets if w is not None]
-    refine_card = next(w for w in widgets
-                       if isinstance(w, QtWidgets.QGroupBox)
-                       and w.title().startswith("Refine parameters"))
-    assert widgets.index(page._card_stack) < widgets.index(refine_card)
+    titles = [w.title() for w in widgets if isinstance(w, QtWidgets.QGroupBox)]
+    order = [next(i for i, t in enumerate(titles) if t.startswith(k))
+             for k in ("Pipeline", "Define experiment", "Radially adaptive",
+                       "Projection", "Parameters", "Advanced")]
+    assert order == sorted(order), titles
+    assert not any(t.startswith(("Mean of frames", "Refine parameters",
+                                 "Initial seed", "Transforms", "Detector &"))
+                   for t in titles), titles
+    params = next(w for w in widgets if isinstance(w, QtWidgets.QGroupBox)
+                  and w.title().startswith("Parameters"))
+    assert params.isAncestorOf(page._card_stack) and params.isAncestorOf(page._param_table)
+    det = next(w for w in widgets if isinstance(w, QtWidgets.QGroupBox)
+               and w.title() == "Define experiment")
+    for cb in (page._tf_flip_y, page._tf_flip_z, page._tf_transp):
+        assert det.isAncestorOf(cb)         # ONE Transforms row for all panels
+    assert det.isAncestorOf(page._load_calib_btn) and det.isAncestorOf(page._from_view_btn)
     assert page._run_btn not in widgets and page._out_ed not in widgets
 
     # _calib_siblings (the Load-All naming resolver, inverse of

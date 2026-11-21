@@ -117,7 +117,7 @@ def test_a_projected_frame_is_used_and_gets_no_second_correction(app, page, monk
     d2, *_ = page._corr_fields(2)
     assert d2 is not None                                     # un-projected panel: unchanged
     page._on_projection_changed()
-    assert not page._avg_card.isEnabled(), "Mean of frames must be off while projected"
+    assert not hasattr(page, "_avg_card"), "Mean of frames is gone; Projection covers it"
     monkeypatch.setattr(page._loader, "projected", lambda n: None)
     page._on_projection_changed()
 
@@ -147,3 +147,79 @@ def test_the_panels_tab_compares_the_fits_and_flags_an_lsd_outlier(app, page):
         for c in page._cards.values():
             c.result = None
         page._update_panels_table()
+
+
+# ── defaults and shared controls (2026-11-20 requests) ────────────────────
+
+def test_pixel_defaults_to_200um_on_every_hydra_page(app):
+    from midas_gui.hydra_calib_page import HydraCalibrationPage
+    from midas_gui.hydra_geometry_card import DetectorGeometryCard
+    assert HydraCalibrationPage()._pxY.value() == pytest.approx(200.0)
+    assert DetectorGeometryCard()._px.value() == pytest.approx(200.0)
+
+
+def test_calibrate_defaults_parallel_and_no_distortion_or_residual_map(app, page):
+    assert page._run_mode_combo.currentData() == "parallel"
+    assert not page._ref_dist.isChecked()
+    assert not page._build_rc.isChecked()
+
+
+def test_single_detector_calibrate_also_defaults_distortion_and_residual_off(app):
+    from midas_gui.tab_calibrate import CalibrationTab
+    tab = CalibrationTab()
+    assert not tab._ref_dist.isChecked() and not tab._build_rc.isChecked()
+
+
+def test_range_decimals(app, page):
+    lw = page._limit_widgets
+    for k in ("Lsd", "BC_y", "ty"):
+        assert lw[k][0].decimals() == 1
+    for k in ("wavelength_A", "distortion"):
+        assert lw[k][0].decimals() == 3
+
+
+def test_one_transform_row_drives_all_panels(app, page):
+    page._tf_flip_y.setChecked(True)
+    assert all(c.im_trans_codes() == [1] for c in page._cards.values())
+    page._tf_flip_y.setChecked(False)
+    assert all(c.im_trans_codes() == [] for c in page._cards.values())
+    # a card changed from elsewhere (e.g. a loaded file) spreads to the rest
+    from midas_gui.helpers import set_im_trans_codes
+    c2 = page._cards[2]
+    set_im_trans_codes(c2._flip_y, c2._flip_z, c2._transp, [2])
+    c2.imTransChanged.emit()
+    assert page._tf_flip_z.isChecked()
+    assert all(c.im_trans_codes() == [2] for c in page._cards.values())
+    page._tf_flip_z.setChecked(False)
+
+
+def test_parameter_panel_buttons_follow_the_image_toolbar(app, page):
+    page._toolbar.set_current("ge3")
+    assert page._param_panel_btns[3].isChecked()
+    page._param_panel_btns[2].click()
+    assert page._toolbar.current() == "ge2"
+    assert page._active_card.panel_number == 2
+
+
+def test_all_same_copies_and_follows_seed_but_keeps_tx(app, page):
+    page._toolbar.set_current("ge1")
+    page._cards[1]._seed_lsd.setValue(2345.0)
+    page._all_same.setChecked(True)
+    for n in (2, 3, 4):
+        assert page._cards[n]._seed_lsd.value() == pytest.approx(2345.0)
+    page._cards[1]._seed_bcy.setValue(1000.5)
+    assert page._cards[4]._seed_bcy.value() == pytest.approx(1000.5)
+    assert [page._cards[n]._seed_tx.value() for n in (1, 2, 3, 4)] == [300, 30, 120, 210]
+    page._all_same.setChecked(False)
+    page._cards[1]._seed_bcy.setValue(5.0)
+    assert page._cards[2]._seed_bcy.value() == pytest.approx(1000.5)
+
+
+def test_controls_header_has_help_popup_and_no_banner(app, page):
+    from PyQt5 import QtWidgets
+    assert "Four independent fits" in page._help_html
+    # The text lives only in the popup (its own window), not in the page layout.
+    assert not any("Four independent fits" in l.text()
+                   for l in page.findChildren(QtWidgets.QLabel)
+                   if l.window() is page.window())
+    assert any(b.text() == "?" for b in page.findChildren(QtWidgets.QToolButton))

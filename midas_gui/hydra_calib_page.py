@@ -4,10 +4,12 @@
 composition: a shared ``HydraLoaderPanel`` for data, one small
 ``HydraCalibPanelCard`` per GE panel (Transforms + seed + fitted result,
 each genuinely independent per physical panel — see that module's
-docstring), and shared "recipe" cards (Pipeline, Detector & Calibrant,
-Threshold, Mean of frames, Refine parameters, Advanced) applied identically
-to every panel's fit, since it's the same beam and the same choice of what
-to refine for all 4.
+docstring). The middle column follows single-detector Calibrate's order:
+Pipeline, Define experiment (Load calibration, λ/Calibrant/Pixel, and all
+four panels' Transforms), Threshold, Projection, Parameters (one table bound
+to the selected panel, shared Refine ticks and ± windows), Advanced. The
+recipe is applied identically to every panel's fit, since it's the same beam
+and the same choice of what to refine for all 4.
 
 Calibration for the panels currently loaded can run Sequentially (one panel
 at a time) or in Parallel (all panels started at once). Both are equally
@@ -18,8 +20,8 @@ their own real stdout rather than racing on one process-global stream.
 The loader's Projection card (Max / Sum / Mean over a frame range, per panel) is
 surfaced here as it is in single-detector Calibrate. A projected frame is already
 dark/bright/background-corrected, so ``_corr_fields`` hands ``CalibrationWorker``
-no corrections while one is active (it would otherwise subtract them twice);
-"Mean of frames" is disabled meanwhile.
+no corrections while one is active (it would otherwise subtract them twice).
+(The old "Mean of frames" card is gone: Projection > Mean covers it.)
 """
 from __future__ import annotations
 
@@ -32,16 +34,17 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 
 from midas_gui.constants import (
-    CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, restored_pipeline_label, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
+    CALIBRANTS, PIPELINES, DEFAULT_PIPELINE, restored_pipeline_label, DEFAULT_WAVELENGTH, HYDRA_DEFAULT_PIXEL_UM,
     DISTORTION_NAMES)
 from midas_gui.helpers import (
     _fspin, _NoScrollSpinBox, _NoScrollComboBox, make_kedge_label, make_pixel_label,
-    _load_image, apply_field_corrections, average_field, source_kind,
+    _load_image, apply_field_corrections,
     widgets_to_dict, apply_dict_to_widgets, _predict_ring_radii, refresh_combo_items,
     browse_start_dir, warn_if_path_missing, suggest_working_dir, rmax_corner_px,
     check_output_dir_writable, scratch_dir, SCRATCH_DIRNAME, apply_radial_threshold,
     default_radial_threshold_points, median_intensity_near_bc, geometry_fields_from_file,
-    _apply_im_trans)
+    _apply_im_trans, link_im_trans_checkboxes, im_trans_codes_from_checkboxes,
+    set_im_trans_codes)
 from midas_gui.widgets import (PickableImageViewer, LogPanel, CakeViewer, _convert_radial,
                                OriginToolButton, RadialThresholdEditor)
 from midas_gui.hydra_widgets import (HydraLoaderPanel, HydraDetectorToolbar,
@@ -54,7 +57,7 @@ from midas_gui import project
 from midas_gui import settings
 from midas_gui import style as S
 from midas_gui.calib_param_table import CalibrationParameterTable
-from midas_gui.panel_toggle import install_panel_toggles
+from midas_gui.panel_toggle import install_panel_toggles, CONTROLS
 
 
 _KNOWN_CALIB_SUFFIXES = (".instr.txt", ".instr.json", ".txt", ".json")
@@ -264,15 +267,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         split.setChildrenCollapsible(False); split.setHandleWidth(6)
         root.addWidget(split, 1)
 
-        # ── LEFT: "← Data Viewer" + the Hydra data loader ──
+        # ── LEFT: the Hydra data loader ──
         left = QtWidgets.QWidget()
         ll = QtWidgets.QVBoxLayout(left); ll.setContentsMargins(0, 0, 0, 0); ll.setSpacing(4)
-        self._from_view_btn = QtWidgets.QPushButton("← Data Viewer")
-        self._from_view_btn.setToolTip(
-            "Pull the Hydra panel data path and each panel's fitted geometry "
-            "(BC/Lsd/tilts/transforms) from the Data Viewer's Hydra page.")
-        self._from_view_btn.clicked.connect(self.pullFromViewer.emit)
-        ll.addWidget(self._from_view_btn)
         self._loader = HydraLoaderPanel(masks=True)
         self._loader.siblingsChanged.connect(self._on_siblings_changed)
         self._loader.frameChanged.connect(self._on_frame_changed)
@@ -293,20 +290,56 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         # marked "(shared)", and that was exactly what misled: "shared"
         # reads as one value for all four detectors, i.e. a joint fit, when
         # it means one recipe driving four independent fits.
-        banner = QtWidgets.QLabel(
+        # Shown from the "?" in the Controls header (see _install_help below),
+        # not as a permanent banner.
+        self._help_html = (
             "<b>Four independent fits — one per panel.</b> The panels are "
-            "NOT treated as a single detector. Cards marked <i>same for all "
-            "4 fits</i> set the inputs each fit uses; the fitted geometry "
-            "(BC, Lsd, ty, tz, distortion) is per-panel and lives on the "
-            "ge1–ge4 card below, as does each panel's result.")
-        banner.setWordWrap(True)
-        banner.setStyleSheet(
-            f"color:{S.MUTED};font-size:10px;border:1px solid {S.ACCENT};"
-            "border-radius:3px;padding:5px;")
-        lv.addWidget(banner)
+            "NOT treated as a single detector. Pipeline, calibrant, "
+            "Transforms, Refine ticks and ± windows are one recipe used by "
+            "all four fits; the seed values in Parameters (the ge button you "
+            "have selected, unless <i>All same</i> is ticked) are per panel, "
+            "as is every fitted geometry and result.")
 
-        # Pipeline
-        pipe = S.make_card("Pipeline  (all 4 panels)")
+        # Per-panel pieces, built first because Define experiment holds each
+        # panel's Transforms row and Parameters holds the seed footer stack.
+        self._panel_hdr = QtWidgets.QLabel("")
+        self._panel_hdr.setWordWrap(True)
+        self._panel_hdr.setTextFormat(QtCore.Qt.RichText)
+        self._panel_hdr.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:3px;")
+        self._seed_status_lbl = QtWidgets.QLabel("Seed: automatic")
+        self._seed_status_lbl.setWordWrap(True)
+
+        self._card_stack = QtWidgets.QStackedWidget()
+        for n in (1, 2, 3, 4):
+            card = HydraCalibPanelCard(n)
+            card.set_log_fn(self._log_append_raw)
+            card.imTransChanged.connect(lambda n=n: self._on_card_transform_changed(n))
+            for _sp in (card._seed_bcy, card._seed_bcz, card._seed_lsd,
+                        card._seed_ty, card._seed_tz):
+                _sp.valueChanged.connect(lambda *_a, n=n: self._propagate_seed_if_all_same(n))
+            card.calibFileLoaded.connect(self._on_card_calib_file_loaded)
+            card.calibFilePicked.connect(self._on_card_calib_file_picked)
+            card.sendToViewer.connect(self.sendGeometryToViewer.emit)
+            card._manual_seed_check.toggled.connect(
+                lambda checked, n=n: self._sync_seed_checkbox("_manual_seed_check", n, checked))
+            card._feedback_check.toggled.connect(
+                lambda checked, n=n: self._sync_seed_checkbox("_feedback_check", n, checked))
+            for attr in ("_seed_en_bc", "_seed_en_lsd", "_seed_en_tx",
+                        "_seed_en_ty", "_seed_en_tz"):
+                getattr(card, attr).toggled.connect(
+                    lambda checked, n=n, a=attr: self._sync_seed_checkbox(a, n, checked, block=False))
+            card._seed_bcy.valueChanged.connect(self._redraw_lab_axes_if_on)
+            card._seed_bcz.valueChanged.connect(self._redraw_lab_axes_if_on)
+            card._seed_tx.valueChanged.connect(lambda *_: self._update_panels_overview())
+            card._seed_en_tx.toggled.connect(lambda *_: self._update_panels_overview())
+            card.seedStateChanged.connect(self._refresh_seed_status)
+            self._cards[n] = card
+            self._card_stack.addWidget(card)
+        self._refresh_seed_status()
+        self._refresh_seed_status()
+
+        # ── Pipeline ──
+        pipe = S.make_card("Pipeline")
         self._pipeline = _NoScrollComboBox()
         for label, key, enabled in PIPELINES:
             self._pipeline.addItem(label, key)
@@ -318,8 +351,28 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         pipe.body.addWidget(self._pipeline)
         lv.addWidget(pipe)
 
-        # Detector & Calibrant (shared — same beam/detector model for all 4 panels)
-        det = S.make_card("Detector & Calibrant  (all 4 panels)")
+        # ── Define experiment ──
+        det = S.make_card("Define experiment")
+        # One Load button for the whole page: it loads into the SELECTED panel
+        # and resolves the other three panels' sibling files (see
+        # _on_card_calib_file_picked), where the single-detector tab loads one.
+        self._load_calib_btn = QtWidgets.QPushButton("Load calibration file…")
+        self._load_calib_btn.setToolTip(
+            "Load geometry from a MIDAS paramstest (.txt), a calibration .json, "
+            "or a pyFAI .poni into the SELECTED panel — sets λ, pixel size, and "
+            "that panel's seed BC/Lsd/tilts. Sibling files for the other panels "
+            "are picked up too. tx stays at each panel's fixed value.")
+        self._load_calib_btn.clicked.connect(
+            lambda: self._active_card is not None and self._active_card._load_calib_file())
+        self._from_view_btn = QtWidgets.QPushButton("→ Get from Data Viewer")
+        self._from_view_btn.setToolTip(
+            "Pull the Hydra panel data path and each panel's fitted geometry "
+            "(BC/Lsd/tilts/transforms) from the Data Viewer's Hydra page.")
+        self._from_view_btn.clicked.connect(self.pullFromViewer.emit)
+        _lrow = QtWidgets.QHBoxLayout(); _lrow.setSpacing(4)
+        _lrow.addWidget(self._load_calib_btn); _lrow.addWidget(self._from_view_btn)
+        _lrow.addStretch(1)
+        det.body.addLayout(_lrow)
         self._wl = _fspin(0.001, 10.0, 5, DEFAULT_WAVELENGTH, "Å")
         self._cal = _NoScrollComboBox(); self._cal.addItems(CALIBRANTS); self._cal.setMaximumWidth(150)
         # A Form().row() stretches every field column equally, which spreads
@@ -344,9 +397,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._sync_rings_btn()
         wl_row.addStretch(1)
         det.body.addLayout(wl_row)
-        self._pxY = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm")
+        self._pxY = _fspin(1.0, 5000.0, 2, HYDRA_DEFAULT_PIXEL_UM, "µm")
         self._pxZ_check = QtWidgets.QCheckBox("pxZ")
-        self._pxZ_spin = _fspin(1.0, 5000.0, 2, DEFAULT_PIXEL_UM, "µm"); self._pxZ_spin.setEnabled(False)
+        self._pxZ_spin = _fspin(1.0, 5000.0, 2, HYDRA_DEFAULT_PIXEL_UM, "µm"); self._pxZ_spin.setEnabled(False)
         self._pxZ_check.toggled.connect(self._pxZ_spin.setEnabled)
         # No stretch on any of these: a stretched spinbox grows well past its
         # digits, which visually reads as "far from" the checkbox beside it
@@ -356,13 +409,34 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         prow.addStretch(1)
         det.body.addLayout(S.Form().row(
             (make_pixel_label(self._pxY, "Pixel:", also=self._pxZ_spin), prow)))
+        # Transforms: ONE choice, applied to every panel.
+        self._tf_flip_y = QtWidgets.QCheckBox("Flip Y")
+        self._tf_flip_z = QtWidgets.QCheckBox("Flip Z")
+        self._tf_transp = QtWidgets.QCheckBox("Transpose")
+        link_im_trans_checkboxes(self._tf_flip_y, self._tf_flip_z, self._tf_transp)
+        self._tf_guard = False
+        for _cb in (self._tf_flip_y, self._tf_flip_z, self._tf_transp):
+            _cb.toggled.connect(lambda *_a: self._on_shared_transform_toggled())
+        _trow = QtWidgets.QHBoxLayout(); _trow.setSpacing(8)
+        _tl = QtWidgets.QLabel("Transforms:")
+        _tl.setToolTip("One choice, applied to all four panels.")
+        _trow.addWidget(_tl)
+        _trow.addWidget(self._tf_flip_y); _trow.addWidget(self._tf_flip_z)
+        _trow.addWidget(self._tf_transp); _trow.addStretch(1)
+        det.body.addLayout(_trow)
+        self._panels_lbl = QtWidgets.QLabel("")
+        self._panels_lbl.setWordWrap(True)
+        self._panels_lbl.setTextFormat(QtCore.Qt.RichText)
+        self._panels_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px;")
+
+        det.body.addWidget(self._panels_lbl)
         lv.addWidget(det)
 
         # Threshold (shared card; radial origin is whichever panel is active's own BC)
         # Checkable QGroupBox — the on/off toggle lives in the heading itself
         # rather than a separate checkbox in the body, matching
         # tab_calibrate.py's own Threshold card.
-        thr = S.make_card("Radially adaptive threshold  (interactive curve in r from BC, shared)")
+        thr = S.make_card("Radially adaptive threshold (interactive curve in r from BC)")
         thr.setCheckable(True); thr.setChecked(False)
         thr.setToolTip(
             "When on, a pixel is set to 0 if it is dimmer than the curve\n"
@@ -392,106 +466,43 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._thr_editor.pointsChanged.connect(self._on_threshold_points_changed)
         lv.addWidget(thr)
 
-        # Mean of frames (shared range — panels are synchronized frames of one scan)
-        # Checkable QGroupBox, same convention as Threshold above and as
-        # tab_calibrate.py's own Mean-of-frames card.
-        avgc = QtWidgets.QGroupBox("Mean of frames  (shared range)")
-        avgc.setCheckable(True); avgc.setChecked(False)
-        avgc_body = QtWidgets.QVBoxLayout(avgc)
-        avgc_body.setContentsMargins(8, 6, 8, 6); avgc_body.setSpacing(5)
-        avgc.body = avgc_body
-        self._avg_check = avgc
-        self._avg_start = _NoScrollSpinBox(); self._avg_start.setRange(0, 999999)
-        self._avg_end = _NoScrollSpinBox(); self._avg_end.setRange(0, 999999)
-        self._avg_end.setToolTip("Last frame (exclusive). 0 = all frames.")
-        for w in (self._avg_start, self._avg_end):
-            w.setEnabled(False)
-        afm = S.Form(); afm.row(("start:", self._avg_start), ("end(0=all):", self._avg_end))
-        avgc.body.addLayout(afm)
-        self._avg_note = QtWidgets.QLabel("")
-        self._avg_note.setStyleSheet(f"color:{S.MUTED};font-size:10px"); self._avg_note.setWordWrap(True)
-        avgc.body.addWidget(self._avg_note)
-        self._avg_card = avgc
-        self._avg_check.toggled.connect(self._on_avg_toggled)
-        for w in (self._avg_start, self._avg_end):
-            w.valueChanged.connect(self._on_avg_changed)
-        lv.addWidget(avgc)
-        # Stack projection (Max / Sum / Mean over a frame range, all panels): the
-        # loader owns it, as in the Hydra viewer. A projected frame is already
+        # ── Projection ── (Max / Sum / Mean over a frame range, per panel; the
+        # loader owns it, as in the Hydra viewer). A projected frame is already
         # dark/bright/background-corrected, so while one is active the fits get
-        # NO field corrections (see _corr_fields) and Mean of frames is off.
+        # NO field corrections (see _corr_fields).
         lv.addWidget(self._loader.projection_card())
         self._loader.projectionChanged.connect(self._on_projection_changed)
-        # Which panels are in play, what tx each will use, and which one is
-        # running. Asked for at the beamline in one breath: "it is unclear
-        # what parameters are dedicated to each GE panel ... which panel is
-        # being fitted ... and I do not know what Tx they are getting."
-        # The per-panel card below shows one panel at a time, so none of
-        # those three were answerable without clicking through all four.
-        self._panels_lbl = QtWidgets.QLabel("")
-        self._panels_lbl.setWordWrap(True)
-        self._panels_lbl.setTextFormat(QtCore.Qt.RichText)
-        self._panels_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px;")
-        lv.addWidget(self._panels_lbl)
 
-
-        # Always-visible seed-status banner — unlike each card's own seed
-        # summary (only visible for whichever one panel is currently shown),
-        # this reflects the shared seed-enable state across all 4 panels
-        # (mirrored by _sync_seed_checkbox) so it's never necessary to open
-        # the Manual seed… dialog, or switch panels, just to see whether a
-        # manual seed is about to be used in the next Run All.
-        self._seed_status_lbl = QtWidgets.QLabel("Seed: automatic")
-        self._seed_status_lbl.setWordWrap(True)
-        lv.addWidget(self._seed_status_lbl)
-
-
-        # Per-panel: Transforms + Initial seed, switched with the active
-        # panel — positioned here (between Mean of frames and Refine
-        # parameters) to match where tab_calibrate.CalibrationTab's own
-        # "Initial seed" card sits, rather than after Run.
-        self._panel_hdr = QtWidgets.QLabel("")
-        self._panel_hdr.setStyleSheet(
-            f"color:{S.ACCENT};font-size:11px;font-weight:bold;padding-top:4px;")
-        lv.addWidget(self._panel_hdr)
-        self._card_stack = QtWidgets.QStackedWidget()
+        refc = S.make_card("Parameters  (Pick tools on image)")
+        # Which panel the table is showing, and what is per panel vs shared.
+        # "(shared)" read as one value for all four detectors and "(same for
+        # all 4 fits)" was asked about too, so say it once, here: the seed
+        # values are the selected panel's own; Refine ticks and ± windows
+        # are one choice used by every fit, each fit still settling at its
+        # own values.
+        # ge1-ge4 buttons: another way to pick the panel, kept in step with the
+        # GE1-GE4 buttons above the image (HydraDetectorToolbar).
+        self._param_panel_btns: dict = {}
+        _pgrp = QtWidgets.QButtonGroup(self); _pgrp.setExclusive(True)
+        _prow = QtWidgets.QHBoxLayout(); _prow.setSpacing(4)
         for n in (1, 2, 3, 4):
-            card = HydraCalibPanelCard(n)
-            card.set_log_fn(self._log_append_raw)
-            card.imTransChanged.connect(lambda n=n: self._on_card_transform_changed(n))
-            card.calibFileLoaded.connect(self._on_card_calib_file_loaded)
-            card.calibFilePicked.connect(self._on_card_calib_file_picked)
-            card.sendToViewer.connect(self.sendGeometryToViewer.emit)
-            card._manual_seed_check.toggled.connect(
-                lambda checked, n=n: self._sync_seed_checkbox("_manual_seed_check", n, checked))
-            card._feedback_check.toggled.connect(
-                lambda checked, n=n: self._sync_seed_checkbox("_feedback_check", n, checked))
-            for attr in ("_seed_en_bc", "_seed_en_lsd", "_seed_en_tx",
-                        "_seed_en_ty", "_seed_en_tz"):
-                getattr(card, attr).toggled.connect(
-                    lambda checked, n=n, a=attr: self._sync_seed_checkbox(a, n, checked, block=False))
-            card._seed_bcy.valueChanged.connect(self._redraw_lab_axes_if_on)
-            card._seed_bcz.valueChanged.connect(self._redraw_lab_axes_if_on)
-            card._seed_tx.valueChanged.connect(lambda *_: self._update_panels_overview())
-            card._seed_en_tx.toggled.connect(lambda *_: self._update_panels_overview())
-            card.seedStateChanged.connect(self._refresh_seed_status)
-            self._cards[n] = card
-            self._card_stack.addWidget(card)
-        self._refresh_seed_status()
-        lv.addWidget(self._card_stack)
-
-        # Refine parameters (shared)
-        refc = S.make_card("Refine parameters  (all 4 panels)")
-        # "(shared)" read as one value for all four detectors; "(same for
-        # all 4 fits)" was asked about too ("What does this mean?"). The
-        # distinction is which-knobs-are-free versus what-they-settle-at,
-        # and a card title cannot carry it -- so spell it out once, here.
-        ref_note = QtWidgets.QLabel(
-            "Which parameters are free to move. The same choice is used for "
-            "every panel — each panel still fits its <b>own</b> values.")
-        ref_note.setWordWrap(True)
-        ref_note.setStyleSheet(f"color:{S.MUTED};font-size:10px;padding-bottom:3px;")
-        refc.body.addWidget(ref_note)
+            _b = QtWidgets.QPushButton(f"ge{n}"); _b.setCheckable(True)
+            _b.setToolTip(f"Show / edit ge{n}'s seed values (same as the GE{n} "
+                          "button above the image).")
+            _b.clicked.connect(lambda _=False, n=n: self._toolbar.set_current(f"ge{n}"))
+            _pgrp.addButton(_b); _prow.addWidget(_b)
+            self._param_panel_btns[n] = _b
+        self._param_panel_btns[1].setChecked(True)
+        self._all_same = QtWidgets.QCheckBox("All same")
+        self._all_same.setToolTip(
+            "Give every panel the same seed values (BC, Lsd, ty, tz) as the "
+            "selected one, and keep them in step while you edit. tx stays at "
+            "each panel's fixed value. The Refine ticks and ± ranges below "
+            "are already one setting for all four panels.")
+        self._all_same.toggled.connect(self._on_all_same_toggled)
+        _prow.addSpacing(8); _prow.addWidget(self._all_same); _prow.addStretch(1)
+        refc.body.addLayout(_prow)
+        refc.body.addWidget(self._panel_hdr)
         self._ref_lsd = QtWidgets.QCheckBox("Lsd"); self._ref_lsd.setChecked(True)
         self._ref_bc = QtWidgets.QCheckBox("BC"); self._ref_bc.setChecked(True)
         self._ref_ty = QtWidgets.QCheckBox("ty"); self._ref_ty.setChecked(True)
@@ -518,8 +529,8 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             "(Determine it from grain spots or Friedel-pair omega splitting "
             "if you need to measure it.)")
         self._ref_wl = QtWidgets.QCheckBox("Wavelength")
-        self._ref_dist = QtWidgets.QCheckBox("Distortion"); self._ref_dist.setChecked(True)
-        self._build_rc = QtWidgets.QCheckBox("Residual map"); self._build_rc.setChecked(True)
+        self._ref_dist = QtWidgets.QCheckBox("Distortion"); self._ref_dist.setChecked(False)
+        self._build_rc = QtWidgets.QCheckBox("Residual map"); self._build_rc.setChecked(False)
 
         # One row per parameter: the refine checkbox on the left, and the
         # backend's always-applied ± tolerance window on the right — Hydra is
@@ -585,8 +596,12 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                           "ty": (_tols0["tolTilts"], "°"),
                           "wavelength_A": (_tols0["tolWavelength"], "Å"),
                           "distortion": (_tols0["tolDistortion"], None)}
+        # Range widths: 1 decimal for Lsd / BC / tilts, 3 for wavelength and
+        # distortion. Set before the values so they are not pre-rounded.
+        _decimals = {"Lsd": 1, "BC_y": 1, "ty": 1, "wavelength_A": 3, "distortion": 3}
         for _name, (_val, _unit) in _xtal_defaults.items():
             _spin, _combo = self._limit_widgets[_name]
+            _spin.setDecimals(_decimals[_name])
             _spin.setValue(_val)
             if _unit is not None:
                 _idx = _combo.findText(_unit)
@@ -594,10 +609,13 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                     _combo.setCurrentIndex(_idx)
         refc.body.addWidget(self._param_table)
         refc.body.addWidget(self._build_rc)
+        refc.body.addWidget(self._seed_status_lbl)
+        refc.body.addWidget(self._card_stack)
         self._ref_dist.toggled.connect(lambda _=0: self._update_dist_label())
         self._ref_dist.toggled.connect(self._update_limits_note)
         self._pipeline.currentIndexChanged.connect(self._update_limits_note)
         lv.addWidget(refc)
+        self._refc_card = refc
 
         self._update_dist_label()
         self._update_limits_note()
@@ -658,6 +676,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._run_mode_combo = _NoScrollComboBox()
         self._run_mode_combo.addItem("Sequential", "sequential")
         self._run_mode_combo.addItem("Parallel", "parallel")
+        self._run_mode_combo.setCurrentIndex(self._run_mode_combo.findData("parallel"))
         self._run_mode_combo.setToolTip(
             "Sequential: one panel fit at a time — full per-line log capture.\n"
             "Parallel: all present panels fit at once — faster, but each panel's "
@@ -854,7 +873,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         split.setStretchFactor(0, 0); split.setStretchFactor(1, 0); split.setStretchFactor(2, 1)
         split.setSizes([286, 361, 950])
         # Data | Controls | Results: minimise Data/Controls to the bottom ribbon.
-        root.addWidget(install_panel_toggles(split, key="hydra_calibrate").ribbon)
+        _toggles = install_panel_toggles(split, key="hydra_calibrate")
+        _toggles.add_help(CONTROLS, self._help_html)
+        root.addWidget(_toggles.ribbon)
 
     # ── Loader signal handlers ──────────────────────────────────────
 
@@ -1145,12 +1166,13 @@ class HydraCalibrationPage(QtWidgets.QWidget):
 
     def _on_siblings_changed(self, siblings: dict):
         self._toolbar.set_available(siblings.keys())
+        for pn, b in self._param_panel_btns.items():
+            b.setEnabled(pn in siblings)
         self._update_panels_overview()
         # Safe to autofill straight off the load signal here, unlike
         # CalibrationTab: this page never loads a bundled demo image in
         # __init__, so there is no packaged path to derive a bogus default from.
         self._maybe_autofill_working_dir()
-        self._sync_avg_controls()
         detected = self._loader.detected_geometry()
         if "wavelength_A" in detected:
             self._wl.setValue(float(detected["wavelength_A"]))
@@ -1172,7 +1194,12 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             self._active_card.bind_viewer(None)
         if hasattr(self, "_panel_hdr"):
             self._panel_hdr.setText(
-                f"ge{n} — this panel only (transforms, seed, result)")
+                f"<b>ge{n}</b> — the seed values below are this panel's own. "
+                "Refine ticks and ± windows are one choice used by all four "
+                "fits; each fit still settles at its own values.")
+        if hasattr(self, "_param_panel_btns"):
+            for pn, b in self._param_panel_btns.items():
+                b.blockSignals(True); b.setChecked(pn == n); b.blockSignals(False)
         self._card_stack.setCurrentWidget(self._cards[n])
         self._resid_stack.setCurrentWidget(self._cards[n].residual_chart)
         self._results_stack.setCurrentWidget(self._cards[n].results_widget)
@@ -1197,8 +1224,57 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._refresh_display()
 
     def _on_card_transform_changed(self, n: int):
+        """A card's transforms changed (a loaded calibration file, a restore):
+        the one shared choice follows it and every other panel gets the same."""
+        if not self._tf_guard:
+            self._push_transforms(self._cards[n].im_trans_codes())
         if self._active_card is self._cards.get(n):
             self._refresh_display()
+
+    def _on_shared_transform_toggled(self):
+        if self._tf_guard:
+            return
+        self._push_transforms(im_trans_codes_from_checkboxes(
+            self._tf_flip_y, self._tf_flip_z, self._tf_transp))
+        self._refresh_display()
+
+    def _push_transforms(self, codes) -> None:
+        """Make ``codes`` the transform of the shared row and of all 4 panels."""
+        self._tf_guard = True
+        try:
+            set_im_trans_codes(self._tf_flip_y, self._tf_flip_z, self._tf_transp, codes)
+            for card in self._cards.values():
+                if list(card.im_trans_codes()) != list(codes):
+                    set_im_trans_codes(card._flip_y, card._flip_z, card._transp, codes)
+        finally:
+            self._tf_guard = False
+
+    # ── "All same" seed ──────────────────────────────────────────────
+
+    _SEED_SPINS = ("_seed_bcy", "_seed_bcz", "_seed_lsd", "_seed_ty", "_seed_tz")
+
+    def _on_all_same_toggled(self, on: bool):
+        if on and self._active_card is not None:
+            self._copy_seed_to_all(self._active_card.panel_number)
+
+    def _propagate_seed_if_all_same(self, n: int):
+        if (getattr(self, "_all_same", None) is None or not self._all_same.isChecked()
+                or getattr(self, "_all_same_busy", False)
+                or self._active_card is None or self._active_card.panel_number != n):
+            return
+        self._copy_seed_to_all(n)
+
+    def _copy_seed_to_all(self, n: int):
+        src = self._cards[n]
+        self._all_same_busy = True
+        try:
+            for m, card in self._cards.items():
+                if m == n:
+                    continue
+                for attr in self._SEED_SPINS:
+                    getattr(card, attr).setValue(getattr(src, attr).value())
+        finally:
+            self._all_same_busy = False
 
     def _on_card_calib_file_loaded(self, g: dict):
         if g.get("wavelength_A"):
@@ -1291,17 +1367,9 @@ class HydraCalibrationPage(QtWidgets.QWidget):
 
     # ── Per-panel frame sourcing ─────────────────────────────────────
 
-    def _avg_index_range(self, n_frames: int) -> tuple:
-        """(start, end_inclusive) for ``helpers.average_field``, translated
-        from the start/end(0=all, exclusive) spinbox convention shared with
-        the single-detector Calibrate tab's Mean-of-frames card."""
-        end = n_frames if self._avg_end.value() <= 0 else min(self._avg_end.value(), n_frames)
-        start = max(0, self._avg_start.value())
-        return start, max(start, end - 1)
-
     def _panel_raw_image(self, n: int) -> Optional[np.ndarray]:
         """Raw (uncorrected, untransformed) source image for panel ``n`` —
-        the mean over a frame range if enabled, else the current frame.
+        the stack projection if one is active, else the current frame.
         Deliberately raw: ``CalibrationWorker`` applies bright/background/
         transforms itself (see module docstring)."""
         proj = self._loader.projected(n)
@@ -1312,9 +1380,6 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             return None
         ds = self._loader.dataset()
         try:
-            if self._avg_check.isChecked() and self._loader.n_frames() > 1:
-                start, end = self._avg_index_range(self._loader.n_frames())
-                return average_field(source_kind(path), path, ds, start, end)
             return _load_image(path, ds, self._loader.frame_index())
         except Exception:
             return None
@@ -1356,31 +1421,7 @@ class HydraCalibrationPage(QtWidgets.QWidget):
                 self._loader.background(n), self._loader.bright_mode())
 
     def _on_projection_changed(self):
-        active = any(self._loader.projected(n) is not None for n in (1, 2, 3, 4))
-        self._avg_card.setEnabled(not active and self._loader.n_frames() > 1)
         self._refresh_display()
-
-    def _sync_avg_controls(self):
-        n = self._loader.n_frames()
-        multi = n > 1
-        self._avg_card.setEnabled(
-            multi and not any(self._loader.projected(k) is not None for k in (1, 2, 3, 4)))
-        if not multi and self._avg_check.isChecked():
-            self._avg_check.blockSignals(True); self._avg_check.setChecked(False)
-            self._avg_check.blockSignals(False)
-        hi = max(0, n)
-        for w in (self._avg_start, self._avg_end):
-            w.blockSignals(True); w.setRange(0, hi); w.blockSignals(False)
-        self._update_avg_note()
-
-    def _update_avg_note(self):
-        n = self._loader.n_frames()
-        if n <= 1:
-            self._avg_note.setText("Single-frame source — frame mean unavailable.")
-            return
-        start = self._avg_start.value(); end = self._avg_end.value() or n; end = min(end, n)
-        cnt = len(range(max(0, start), end))
-        self._avg_note.setText(f"mean of {cnt} of {n} frames (start={start}, end={end}).")
 
     def _on_threshold_toggled(self, on: bool):
         self._thr_editor.set_editable(on)
@@ -1395,24 +1436,11 @@ class HydraCalibrationPage(QtWidgets.QWidget):
         self._thr_dialog.raise_()
         self._thr_dialog.activateWindow()
 
-    def _on_avg_toggled(self, on):
-        for w in (self._avg_start, self._avg_end):
-            w.setEnabled(on)
-        self._update_avg_note()
-        self._reset_threshold_defaults_for_active_panel()
-        self._refresh_display()
-
-    def _on_avg_changed(self, *_):
-        self._update_avg_note()
-        if self._avg_check.isChecked():
-            self._reset_threshold_defaults_for_active_panel()
-            self._refresh_display()
-
     def _reset_threshold_defaults_for_active_panel(self):
         """Re-derive radial-threshold default points for the now-active
         panel's raw image (see ``helpers.default_radial_threshold_points``).
         Called only when the underlying raw image actually changes (new
-        data, new frame, panel switch, frame-mean range) — never from the
+        data, new frame, panel switch, projection change) — never from the
         threshold curve's own points, or dragging them would be pointless
         (immediately overwritten by this same derivation)."""
         if self._active_card is None:
@@ -2108,14 +2136,13 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             "pipeline": self._pipeline, "wl": self._wl, "cal": self._cal,
             "pxY": self._pxY, "pxZ_check": self._pxZ_check, "pxZ_spin": self._pxZ_spin,
             "thr_check": self._thr_check,
-            "avg_check": self._avg_check, "avg_start": self._avg_start, "avg_end": self._avg_end,
             "ref_lsd": self._ref_lsd, "ref_bc": self._ref_bc, "ref_ty": self._ref_ty,
             "ref_tz": self._ref_tz, "ref_tx": self._ref_tx, "ref_wl": self._ref_wl,
             "ref_dist": self._ref_dist, "build_rc": self._build_rc,
             "n_iter": self._n_iter, "lm_iter": self._lm_iter, "device": self._device,
             "out_ed": self._out_ed, "run_mode": self._run_mode_combo,
             "cal_r_bin": self._cal_r_bin, "cal_eta_bin": self._cal_eta_bin,
-            "cal_azim": self._cal_azim,
+            "cal_azim": self._cal_azim, "all_same": self._all_same,
             **{f"limit_{n}_val": sp for n, (sp, _c) in self._limit_widgets.items()},
             **{f"limit_{n}_unit": co for n, (_s, co) in self._limit_widgets.items()},
         }
@@ -2175,6 +2202,10 @@ class HydraCalibrationPage(QtWidgets.QWidget):
             card.apply_state_fields(fields)
             if "show_rings" in fields:
                 card.set_show_rings(bool(fields["show_rings"]))
+        # One Transforms choice for all panels: the restore above wrote each
+        # card's own (older projects may differ per panel); panel 1's wins.
+        if self._cards.get(1) is not None and state.get("cards"):
+            self._push_transforms(self._cards[1].im_trans_codes())
         anchor = state.get("anchor_path")
         if anchor and Path(anchor).exists():
             self._loader.set_path(anchor)

@@ -1,8 +1,12 @@
 # Project state
 
-Last updated: 2026-11-17 (d-spacing x-axis + pixel R readout)
+Last updated: 2026-11-20 (Hydra Calibrate: shared transforms, ge buttons, defaults)
 
 ## Now working on
+
+2026-11-20 (later): **Hydra Calibrate tweaks** — pixel 200 µm on all Hydra pages, one shared Transforms row, `?` help popup in the Controls header (banner gone), range decimals, Parallel default, ge1-ge4 buttons + "All same" in Parameters, Distortion/Residual map off by default (DECISIONS 2026-11-20 step 4). Uncommitted on `hydra_ui`; offscreen-checked only. Hydra Integrate still next.
+
+2026-11-20: **Hydra Calibrate layout now matches single Calibrate** (Pipeline, Define experiment with Load + 4-panel Transforms, Threshold, Projection, one Parameters card; Mean of frames removed; DECISIONS 2026-11-20). Uncommitted on `hydra_ui`; offscreen-checked, not live. Hydra Integrate is next.
 
 2026-11-19: **Branch `hydra_ui`** (local, unpushed): redesigning the Hydra Calibrate/Integrate panels to match single-detector ones. Hydra Calibrate is done (shared parameter table, per-panel masks + Mask/Lab-axes overlays, Rings..., Projection, Panels tab; DECISIONS 2026-11-19 hydra_ui steps 1-2). Next: Hydra Integrate.
 
@@ -94,6 +98,12 @@ View details: DECISIONS 2026-10-24 and `documentation/solve_cell_visualizations.
 
 ## Next steps
 
+- **NEXT (resume here): Hydra Integrate redesign on branch `hydra_ui`** (local, unpushed; HEAD `a3082e6`, working tree was clean). Hydra Calibrate is finished (DECISIONS 2026-11-19 hydra_ui steps 1-2). Same agreed approach for Integrate: reuse single-detector components, one control set bound to the selected panel where per-panel, shared where it is one recipe (Hydra = four panels; keep tx fixed, shared R range, per-panel wedges). Gaps vs single Batch Integrate, from the 2026-11-19 screenshots (`tab_batch.py` vs `hydra_batch_page.py` / `hydra_batch_widgets.py`):
+  1. Calibration source: add the "View calibration" popup and the "Cake parameters..." block (R/eta ranges + bins, per panel; wedge default [tx-180, tx-90]), as single Batch has; today Hydra has per-panel cards + a caking summary table.
+  2. Detector view toolbar: Show bin grid, Lab-frame axes (tx-aware, `_redraw_lab_axes_if_on(..., tx=)` already exists), Preview: sum first, Origin, per panel.
+  3. Check the rest of the single-tab layout for parity (Integration kernel / bin type / azimuthal bins, corrections, monitor, output + format, Background jobs panel) and reuse the extracted widgets rather than copy.
+  4. Likely also: default eta wedge from tx instead of -180..180; Q/2theta-uniform bins exposed through the `hydra_batch` ops; tied-Lsd option for Hydra Calibrate (Lsd spread 0.19% on connoly, see DOMAIN.md).
+  Method: survey -> gap list -> implement in small commits -> per-file tests (`pytest tests/<file>.py`, never the whole dir; `hydra_*`, `test_control_api_*`, `test_project*`) -> offscreen screenshot (`gui-offscreen-visual-check` memory). Known unrelated failures on HEAD: `test_calibrate_mask_overlay`, `test_calibrate_projection` (bundled nickel demo image missing). Merge/push of `hydra_ui` not yet decided.
 - Re-run `hydra_mcp_bench` through the real MCP server (register `midas-gui`, new client session); test per-panel eta wedges + Q bins via the ops; consider the same shared-Rmax rule in `batch_cli`.
 - (Planned, not started) Solve Cell phase identification: Symmetry stage -> intensities -> Laue merging -> phase matching; full plan in ROADMAP "Solve Cell: from lattice to phase identification".
 - Ask backend (midas_calibrate_v2) to forward `rings_to_exclude` through `iterate_frozen_point_until_stable` and `first_time_calibrate`; then drop the two GUI warnings in `calib.run_pipeline` (DECISIONS 2026-11-07).

@@ -141,6 +141,9 @@ _LC = {
 # (Eiger2 500K: 75 µm pixels, λ=0.39 Å, Lsd=121 mm) for easy out-of-the-box testing.
 DEFAULT_WAVELENGTH = 0.39      # Å
 DEFAULT_PIXEL_UM   = 75.0      # µm
+# Hydra panels (GE detectors) are 200 µm; every Hydra page defaults to this
+# until the user, or a loaded calibration, sets another value.
+HYDRA_DEFAULT_PIXEL_UM = 200.0  # µm
 DEFAULT_LSD_UM     = 121_000.0 # µm
 DEFAULT_BC_Y       = 10.0      # px (test data beam centre)
 DEFAULT_BC_Z       = 10.0      # px

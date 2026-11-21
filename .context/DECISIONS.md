@@ -3,6 +3,31 @@
 Each entry: what was decided and *why* (the reasoning that would be expensive
 to reconstruct later). Never rewrite history; add a new entry to supersede.
 
+## 2026-11-20 (hydra_ui, step 4) — Hydra Calibrate: one Transforms row, ge buttons + All same, defaults
+
+Branch `hydra_ui`, uncommitted. Seven requested changes:
+
+- **Pixel 200 µm** on every Hydra page: new `constants.HYDRA_DEFAULT_PIXEL_UM`, used by the Calibrate page and the Data Viewer's per-panel `DetectorGeometryCard` (`hydra.PanelState.px` was already 200). Single-detector default stays 75. File-name auto-detect (known detectors) and loaded calibration files still override it, by design.
+- **One Transforms row** (Define experiment) for all panels. The cards keep hidden per-panel boxes as the store (`im_trans_codes`, project state); `_push_transforms` writes the shared choice to all four. A card changed from elsewhere (loaded file) makes its codes the shared choice; older projects with per-panel differences restore with panel 1's.
+- **Banner removed**, text kept as `_help_html` and shown by a `?` button in the Controls header (`PanelToggles.add_help`, `_HelpPopup`). Text now says Transforms are shared.
+- **Range decimals**: Lsd/BC/ty 1, wavelength/distortion 3 (Hydra page only; the shared table is untouched).
+- **Run mode defaults to Parallel**.
+- **ge1-ge4 buttons in Parameters**, two-way linked to the GE1-4 buttons over the image, plus **All same**: copies the selected panel's BC/Lsd/ty/tz seed to all panels and keeps them in step while ticked (tx stays fixed per panel; seed ticks were already mirrored across panels, and Refine ticks / ± ranges were already one shared setting). Default off; saved in project state (`all_same`).
+- **Distortion and Residual map default off** on Hydra; single Calibrate already had both off (test added).
+
+**Tests:** 8 new in `test_hydra_calibrate_parity`, `test_hydra_calib_ui` updated; hydra / project / panel_toggle / tx files pass per-file. Offscreen screenshot checked. Not live-checked with real data.
+
+## 2026-11-20 (hydra_ui, step 3) — Hydra Calibrate middle column reordered to match single Calibrate
+
+Branch `hydra_ui`, uncommitted. Column order is now Pipeline, **Define experiment**, Radially adaptive threshold, Projection, **Parameters (Pick tools on image)**, Advanced; same titles as `tab_calibrate.py` (the "(all 4 panels)" / "(shared)" suffixes are gone; the top banner now says what is per panel vs shared).
+
+- **Define experiment** holds "Load calibration file…" + "→ Get from Data Viewer" (moved from the left Data column), λ / Calibrant / Rings…, Pixel, and **Transforms for all four panels** as four rows (ge1-ge4), plus the panels/tx/running line. One Load button loads into the *selected* panel and still resolves the other three panels' sibling files (`calibFilePicked`).
+- **Parameters** is ONE card: the shared `CalibrationParameterTable` (seed tick + start value + Refine + ± window per row, bound to the selected panel), Residual map, seed-status line, and the per-panel seed footer (Feed result back / note / summary) as the `_card_stack` below the table. The separate "Refine parameters" card and per-panel "Initial seed" / "Transforms" cards no longer exist.
+- **Mean of frames removed** (Projection > Mean covers it): `_avg_*` widgets, handlers and the `avg_*` state keys are gone; old projects with those keys load fine (unknown keys are ignored).
+- `HydraCalibPanelCard` still owns the per-panel widgets (project state, `im_trans_codes`, tx pinning unchanged) but only exposes `transforms_row` and its footer; the page places them.
+
+**Tests:** `test_hydra_calib_ui` (column order + where each piece lives), `test_hydra_calibrate_parity` (no `_avg_card`) updated; all hydra / control_api / project / tx_azimuth files pass per-file; `test_calibrate_mask_overlay` / `test_calibrate_projection` still fail as on HEAD (missing demo image). Checked with an offscreen screenshot. **Not live-checked** with real panel data. Next: Hydra Integrate.
+
 ## 2026-11-19 (hydra_ui, step 2) — Hydra Calibrate: masks, overlays, Rings..., Projection, Panels tab
 
 Branch `hydra_ui` (unpushed). Rest of the agreed Calibrate scope, all reusing single-detector pieces:

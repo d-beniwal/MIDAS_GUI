@@ -37,7 +37,8 @@ from midas_gui import style as S
 
 
 class HydraCalibPanelCard(QtWidgets.QWidget):
-    """One GE panel's Transforms + Initial seed + fitted-result display."""
+    """One GE panel's Transforms, seed state and fitted-result display (the
+    page lays the pieces out; see the seed footer)."""
 
     #: a calibration-file was loaded into this panel's seed fields — carries
     #: the parsed geometry so the owning page can mirror λ/pixel into the
@@ -145,27 +146,27 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
         lv.setSpacing(8)
 
         # ── Transforms ──
-        trans = S.make_card("Transforms")
+        # Not shown in this card: the page's single Transforms row (Define
+        # experiment) sets these on every panel.
         self._flip_y = QtWidgets.QCheckBox("Flip Y")
         self._flip_z = QtWidgets.QCheckBox("Flip Z")
         self._transp = QtWidgets.QCheckBox("Transpose")
         link_im_trans_checkboxes(self._flip_y, self._flip_z, self._transp)
         for cb in (self._flip_y, self._flip_z, self._transp):
             cb.toggled.connect(self.imTransChanged.emit)
-        tb = QtWidgets.QHBoxLayout(); tb.setSpacing(8)
-        tb.addWidget(self._flip_y); tb.addWidget(self._flip_z); tb.addWidget(self._transp)
-        tb.addStretch(1)
-        trans.body.addLayout(tb)
-        lv.addWidget(trans)
+        # One Transforms choice serves all four panels: the page's shared row
+        # drives these boxes. They stay here, hidden, as the per-panel store
+        # (``im_trans_codes``, project state) the fit and preview read.
+        for _cb in (self._flip_y, self._flip_z, self._transp):
+            _cb.setParent(self)
+            _cb.hide()
 
-        # ── Initial seed ──
-        seed = S.make_card("Initial seed  (Pick tools on image)")
-        self._load_seed_btn = QtWidgets.QPushButton("Load calibration file…")
-        self._load_seed_btn.setToolTip(
-            "Load geometry from a MIDAS paramstest (.txt), a calibration .json, "
-            "or a pyFAI .poni — sets this panel's seed BC/Lsd/tilts + transforms.")
-        self._load_seed_btn.clicked.connect(self._load_calib_file)
-        seed.body.addWidget(self._load_seed_btn)
+        # ── Seed footer ──
+        # The seed ticks/values live in the page's one parameter table; what is
+        # left here is this panel's feedback tick, seed note and summary, which
+        # the page shows under that table (a stack, one page per panel).
+        # Loading a calibration file is the page's "Load calibration file…"
+        # button in Define experiment, which calls ``_load_calib_file``.
         # "Manual seed…" opens a non-modal per-parameter panel (see
         # tab_calibrate.CalibrationTab, same design): BC (as one pair — the
         # backend only accepts BC_y/BC_z together), Lsd, tx, ty, tz can each
@@ -248,14 +249,13 @@ class HydraCalibPanelCard(QtWidgets.QWidget):
                    self._seed_tx, self._seed_ty, self._seed_tz):
             _w.setParent(self)
             _w.hide()
-        seed.body.addWidget(self._feedback_check)
-        seed.body.addWidget(self._seed_note)
+        lv.addWidget(self._feedback_check)
+        lv.addWidget(self._seed_note)
         self._seed_summary_lbl = QtWidgets.QLabel("")
         self._seed_summary_lbl.setStyleSheet(f"color:{S.MUTED};font-size:10px")
         self._seed_summary_lbl.setWordWrap(True)
-        seed.body.addWidget(self._seed_summary_lbl)
+        lv.addWidget(self._seed_summary_lbl)
         self._update_seed_summary()
-        lv.addWidget(seed)
         lv.addStretch(1)
 
         # ── Results (built but placed by the owning page into its own

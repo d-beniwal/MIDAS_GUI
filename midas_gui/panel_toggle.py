@@ -57,6 +57,31 @@ _TAB_STYLE = (
 )
 
 
+class _HelpPopup(QtWidgets.QFrame):
+    """Click-away popup carrying a short explanatory text (word-wrapped)."""
+
+    def __init__(self, html: str, parent=None):
+        super().__init__(parent, QtCore.Qt.Popup)
+        self.setStyleSheet(
+            f"QFrame {{ background:{S.STRIP_BG}; border:1px solid {S.ACCENT};"
+            " border-radius:3px; }"
+            f"QLabel {{ color:{S.MUTED}; border:none; font-size:11px; }}")
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 6)
+        self.label = QtWidgets.QLabel(html)
+        self.label.setTextFormat(QtCore.Qt.RichText)
+        self.label.setWordWrap(True)
+        self.label.setFixedWidth(340)
+        lay.addWidget(self.label)
+
+    def show_below(self, widget: QtWidgets.QWidget) -> None:
+        self.adjustSize()
+        pos = widget.mapToGlobal(QtCore.QPoint(widget.width() - self.width(),
+                                               widget.height()))
+        self.move(max(pos.x(), 0), pos.y())
+        self.show()
+
+
 class PanelToggles(QtCore.QObject):
     """Headers + bottom ribbon for one Data | Controls | Results splitter."""
 
@@ -75,6 +100,8 @@ class PanelToggles(QtCore.QObject):
         self._minimized: Dict[str, bool] = {DATA: False, CONTROLS: False}
         self._containers: Dict[str, QtWidgets.QWidget] = {}
         self._tabs: Dict[str, QtWidgets.QToolButton] = {}
+        self._hdr_layouts: Dict[str, QtWidgets.QHBoxLayout] = {}
+        self._help_popups: Dict[str, _HelpPopup] = {}
 
         # Wrap each panel under its header.  Reparenting the panel into the
         # wrapper pulls it out of the splitter, so remember and re-apply the
@@ -143,6 +170,7 @@ class PanelToggles(QtCore.QObject):
         lbl.setStyleSheet(f"color:{S.MUTED}; font-size:10px; font-weight:bold;"
                           " letter-spacing:1px; border:none;")
         hl.addWidget(lbl, 1)
+        self._hdr_layouts[key] = hl
         rst = QtWidgets.QToolButton()
         rst.setText("⟲"); rst.setFixedHeight(20)
         rst.setStyleSheet(_MIN_BTN_STYLE)
@@ -162,6 +190,19 @@ class PanelToggles(QtCore.QObject):
         return hdr
 
     # ── public API ──
+    def add_help(self, key: str, html: str) -> QtWidgets.QToolButton:
+        """Put a ``?`` button in panel ``key``'s header that pops up ``html``."""
+        btn = QtWidgets.QToolButton()
+        btn.setText("?"); btn.setFixedHeight(20)
+        btn.setStyleSheet(_MIN_BTN_STYLE)
+        btn.setCursor(QtCore.Qt.PointingHandCursor)
+        btn.setToolTip("What does this page do? (click)")
+        pop = _HelpPopup(html, btn)
+        self._help_popups[key] = pop
+        btn.clicked.connect(lambda _=False: pop.show_below(btn))
+        self._hdr_layouts[key].insertWidget(1, btn)
+        return btn
+
     def is_minimized(self, key: str) -> bool:
         return self._minimized[key]
 

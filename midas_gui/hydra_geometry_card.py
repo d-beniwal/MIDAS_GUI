@@ -21,7 +21,7 @@ import numpy as np
 from PyQt5 import QtCore, QtGui, QtWidgets
 import pyqtgraph as pg
 
-from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, DEFAULT_PIXEL_UM,
+from midas_gui.constants import (MATERIALS, DEFAULT_WAVELENGTH, HYDRA_DEFAULT_PIXEL_UM,
                            DEFAULT_LSD_UM, DEFAULT_BC_Y, DEFAULT_BC_Z, DEFAULT_RING_WIDTH,
                            DEFAULT_N_RINGS, DEFAULT_STEP_WAVELENGTH,
                            DEFAULT_STEP_LSD_MM, DEFAULT_STEP_PIXEL, DEFAULT_STEP_BC,
@@ -791,7 +791,7 @@ class DetectorGeometryCard(QtWidgets.QWidget):
         # Lsd is shown/entered in mm (calculations & files still use µm).
         self._lsd = _fspin(0.001, 1e6, 3, DEFAULT_LSD_UM / 1000.0, " mm", step=DEFAULT_STEP_LSD_MM)
         self._lsd.setFixedWidth(120)
-        self._px = _fspin(0.1, 1e6, 2, DEFAULT_PIXEL_UM, "µm", step=DEFAULT_STEP_PIXEL)
+        self._px = _fspin(0.1, 1e6, 2, HYDRA_DEFAULT_PIXEL_UM, "µm", step=DEFAULT_STEP_PIXEL)
         self._n_rings = _NoScrollSpinBox()
         self._n_rings.setRange(1, 200)
         self._n_rings.setValue(DEFAULT_N_RINGS)
