@@ -38,15 +38,16 @@ def discover_socket_path(timeout: float = 5.0) -> str:
     """Wait (briefly) for the discovery file, then return its contents.
 
     Raises FileNotFoundError if the control server never published one —
-    i.e. midas-gui isn't running with MIDAS_GUI_CONTROL=1, or hasn't
-    started listening yet."""
+    i.e. midas-gui isn't running, was started with --no-agent-control /
+    MIDAS_GUI_CONTROL=0, or hasn't started listening yet."""
     deadline = time.monotonic() + timeout
     while not DISCOVERY_FILE.exists() and time.monotonic() < deadline:
         time.sleep(0.05)
     if not DISCOVERY_FILE.exists():
         raise FileNotFoundError(
             f"{DISCOVERY_FILE} not found — is midas-gui running with "
-            "MIDAS_GUI_CONTROL=1?")
+            "(agent control is on by default; is it running without "
+            "--no-agent-control / MIDAS_GUI_CONTROL=0?)")
     return DISCOVERY_FILE.read_text(encoding="utf-8").strip()
 
 

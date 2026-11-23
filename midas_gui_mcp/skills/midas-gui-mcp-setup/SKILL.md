@@ -1,6 +1,6 @@
 ---
 name: midas-gui-mcp-setup
-description: Use before driving the midas-gui app through its MCP server (tools named data_viewer_*, calibrate_*, solve_cell_*), or when those tools are missing or fail to connect. Covers launching the GUI with the control socket, registering the server, and diagnosing a dead socket.
+description: Use before driving the midas-gui app through its MCP server (tools named data_viewer_*, calibrate_*, solve_cell_*), or when those tools are missing or fail to connect. Covers the control socket (on by default, how to opt out), registering the server, and diagnosing a dead socket.
 ---
 
 # midas-gui MCP: setup and connection
@@ -11,12 +11,16 @@ that work.
 
 ## Checklist
 
-1. **GUI running with the socket on:** `MIDAS_GUI_CONTROL=1 python launch.py`
-   (from the repo root, in the midas-gui env). Off by default.
+1. **GUI running with the socket on:** it is ON by default — a plain
+   `python launch.py` (or `midas-gui`) from the repo root, in the midas-gui env. The status
+   bar says `Agent control: ready`. It is off only if the GUI was started with
+   `--no-agent-control` or `MIDAS_GUI_CONTROL=0` (status bar: `off`).
 2. **Socket is live:** `~/.midas_gui/midas_gui_control_v1.sock_path` holds the
    socket path; `ls -la` that path must show an `s` file. A path that does
-   not exist means the GUI was started without `MIDAS_GUI_CONTROL=1`, or the
-   file is left over from an older run. Restart the GUI.
+   not exist means the GUI was started with `--no-agent-control` /
+   `MIDAS_GUI_CONTROL=0`, or the file is left over from an older run. Restart the GUI without
+   the flag. If the status bar says `Agent control: other window`, a second midas-gui is
+   running and the agent drives the FIRST one; close it or the extra window.
 3. **Server registered with the client:** `claude mcp list` should show
    `midas-gui`. If not:
    `claude mcp add --transport stdio midas-gui -- <venv>/bin/python <repo>/midas_gui_mcp/server.py`

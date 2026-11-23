@@ -30,6 +30,54 @@ from midas_gui import settings
 from midas_gui import style as S
 
 
+class _EraserFilter(QtCore.QObject):
+    """Viewport event filter for the Mask Builder's eraser. While the eraser is on it
+    consumes left-button press/drag/release on the image (so the view does not pan under
+    the brush) and moves the brush circle on every mouse move. Wheel and the other
+    buttons pass through untouched, so zoom and pan keep working."""
+
+    def __init__(self, tab):
+        super().__init__(tab)
+        self._tab = tab
+
+    def _xy(self, ev):
+        iv = self._tab._viewer._iv
+        sp = iv.ui.graphicsView.mapToScene(ev.pos())
+        p = iv.getImageItem().mapFromScene(sp)
+        return float(p.x()), float(p.y())
+
+    def eventFilter(self, obj, ev):
+        t = self._tab
+        if not t._erase_active or t._image is None:
+            return False
+        et = ev.type()
+        E = QtCore.QEvent
+        if et == E.Leave:
+            if t._erase_ring is not None:
+                t._erase_ring.setVisible(False)
+            return False
+        if et not in (E.MouseButtonPress, E.MouseMove, E.MouseButtonRelease):
+            return False
+        x, y = self._xy(ev)
+        if t._erase_ring is not None:
+            t._erase_ring.setPos(x, y)
+            t._erase_ring.setVisible(True)
+        left = QtCore.Qt.LeftButton
+        if et == E.MouseButtonPress and ev.button() == left:
+            t._erase_stroke = None
+            t._erase_at(x, y)
+            if t._erase_stroke is None:
+                t._erase_stroke = {"c": [], "d": []}
+            return True
+        if et == E.MouseMove and (ev.buttons() & left) and t._erase_stroke is not None:
+            t._erase_at(x, y)
+            return True
+        if et == E.MouseButtonRelease and ev.button() == left and t._erase_stroke is not None:
+            t._erase_end_stroke()
+            return True
+        return False
+
+
 class MaskTab(QtWidgets.QWidget):
     maskReady = QtCore.pyqtSignal(object)   # np.ndarray (uint8) or None
     #: (ok, message) when a Compute Mask run ends — also for the worker-free
@@ -70,6 +118,15 @@ class MaskTab(QtWidgets.QWidget):
         self._img_frames: Optional[dict] = None
         self._img_frame_idx: int = 0
         self._project_ctx = None
+        # Eraser (see "Eraser" section): live state of the brush and its undo stack.
+        self._erase_active = False
+        self._erase_ring = None          # QGraphicsEllipseItem following the cursor
+        self._erase_filter = None        # viewport event filter, built on first use
+        self._erase_stroke = None        # {"c": [...], "d": [...]} while a stroke is open
+        self._erase_undo: list = []      # [{"c": flat idx, "d": flat idx}] per finished stroke
+        self._erase_timer = QtCore.QTimer(self)
+        self._erase_timer.setSingleShot(True); self._erase_timer.setInterval(40)
+        self._erase_timer.timeout.connect(self._erase_refresh)
         # Control API (agent) mode: dialogs are recorded, not shown. See set_agent_mode.
         self._agent_mode = False
         self._agent_msgs: list = []     # [(kind, title, text)] since the last clear
@@ -580,6 +637,35 @@ class MaskTab(QtWidgets.QWidget):
         self._draw_check.setToolTip("Reveal tools to draw shapes that mark regions to mask out.")
         self._draw_check.toggled.connect(self._on_draw_toggled)
         ov_bar.addWidget(self._draw_check)
+        self._erase_check = QtWidgets.QCheckBox("Eraser")
+        self._erase_check.setToolTip(
+            "Clear mask pixels by hand. Shows a circle of the chosen size on the image;\n"
+            "left-click or drag to erase every mask pixel inside it. Wheel zooms as usual\n"
+            "(zoom in for single-pixel work); right/middle drag still pan/zoom. Edits the\n"
+            "mask itself (computed and hand-drawn parts); Undo takes the last strokes back.\n"
+            "Re-running Compute Mask or Apply shapes rebuilds the mask and drops erasures.")
+        self._erase_check.toggled.connect(self._on_eraser_toggled)
+        ov_bar.addWidget(self._erase_check)
+        self._erase_bar = QtWidgets.QWidget()
+        eb = QtWidgets.QHBoxLayout(self._erase_bar)
+        eb.setContentsMargins(0, 0, 0, 0); eb.setSpacing(4)
+        eb.addWidget(QtWidgets.QLabel("Size:"))
+        self._erase_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self._erase_slider.setRange(1, 100); self._erase_slider.setValue(2)
+        self._erase_slider.setFixedWidth(150)
+        self._erase_slider.setToolTip("Eraser circle diameter in detector pixels (1-100).")
+        self._erase_slider.valueChanged.connect(self._on_eraser_size_changed)
+        eb.addWidget(self._erase_slider)
+        self._erase_size_lbl = QtWidgets.QLabel("2 px")
+        self._erase_size_lbl.setMinimumWidth(40)
+        eb.addWidget(self._erase_size_lbl)
+        self._erase_undo_btn = QtWidgets.QPushButton("Undo")
+        self._erase_undo_btn.setFixedHeight(24); self._erase_undo_btn.setEnabled(False)
+        self._erase_undo_btn.setToolTip("Put back the pixels of the last erase stroke.")
+        self._erase_undo_btn.clicked.connect(self._undo_erase)
+        eb.addWidget(self._erase_undo_btn)
+        self._erase_bar.setVisible(False)
+        ov_bar.addWidget(self._erase_bar)
         ov_bar.addStretch(1)
         rv.addLayout(ov_bar)
 
@@ -1065,6 +1151,7 @@ class MaskTab(QtWidgets.QWidget):
     def _set_mask(self, mask):
         """Set the *computed* mask (threshold/stat/loaded), apply pixel dilation,
         and refresh the final mask."""
+        self._erase_undo.clear(); self._update_undo_btn()
         if mask is None:
             self._computed_mask = None
         else:
@@ -1322,11 +1409,201 @@ class MaskTab(QtWidgets.QWidget):
         item = self._shapes[int(index)]
         self._remove_roi(item["roi"] if item["kind"] == "shape" else item["outer"])
 
+    # ── Eraser ────────────────────────────────────────────────────
+    #
+    # Clears pixels of the mask that exists. It edits the two layers the final
+    # mask is built from (computed, hand-drawn) in place, so the result survives
+    # Save / Log to Project / project save exactly like any other mask. The
+    # mask is raw-frame while the viewer paints the Data Viewer's orientation,
+    # so the brush circle is built in the painted frame (what the user sees) and
+    # carried to raw pixels with the reversed display codes.
+
+    def _erase_diameter(self) -> float:
+        return float(self._erase_slider.value())
+
+    def _on_eraser_size_changed(self, v: int) -> None:
+        self._erase_size_lbl.setText(f"{int(v)} px")
+        if self._erase_ring is not None:
+            r = v / 2.0
+            self._erase_ring.setRect(-r, -r, 2 * r, 2 * r)
+
+    def _on_eraser_toggled(self, on: bool) -> None:
+        if on and self._image is None:
+            self._notify("warning", "No image", "Load an image first.")
+            self._erase_check.setChecked(False)
+            return
+        self._erase_active = bool(on)
+        self._erase_bar.setVisible(bool(on))
+        gv = self._viewer._iv.ui.graphicsView
+        if on:
+            # Brush and the point / freeform pickers all want the left button.
+            if self._point_btn.isChecked():
+                self._point_btn.setChecked(False)
+            if self._freeform_btn.isChecked():
+                self._freeform_btn.setChecked(False)
+            if self._erase_filter is None:
+                self._erase_filter = _EraserFilter(self)
+                gv.viewport().installEventFilter(self._erase_filter)
+            if self._erase_ring is None:
+                ring = QtWidgets.QGraphicsEllipseItem()
+                pen = pg.mkPen("#00e5ff", width=1.5); pen.setCosmetic(True)
+                ring.setPen(pen)
+                ring.setBrush(QtGui.QBrush(QtGui.QColor(0, 229, 255, 40)))
+                ring.setZValue(40)
+                self._viewer._iv.getView().addItem(ring, ignoreBounds=True)
+                self._erase_ring = ring
+            self._on_eraser_size_changed(self._erase_slider.value())
+            self._erase_ring.setVisible(False)       # shown on the first mouse move
+            gv.viewport().setCursor(QtCore.Qt.CrossCursor)
+            gv.viewport().setMouseTracking(True)
+        else:
+            self._erase_end_stroke()
+            if self._erase_ring is not None:
+                self._erase_ring.setVisible(False)
+            gv.viewport().unsetCursor()
+
+    def _painted_to_raw(self, cols: np.ndarray, rows: np.ndarray):
+        """Painted-frame pixel indices -> raw detector (rows, cols); identity when the
+        viewer shows the raw orientation. Vectorised ``im_trans_map_point`` of the
+        reversed display codes."""
+        codes = tuple(reversed(tuple(self._disp_codes)))
+        if not codes:
+            return rows, cols
+        n_rows, n_cols = self._disp_shape()
+        cols = cols.copy(); rows = rows.copy()
+        for c in codes:
+            if c == 1:
+                cols = n_cols - 1 - cols
+            elif c == 2:
+                rows = n_rows - 1 - rows
+            elif c == 3:
+                cols, rows = rows, cols
+                n_rows, n_cols = n_cols, n_rows
+        return rows, cols
+
+    @staticmethod
+    def _disc_indices(x: float, y: float, diameter: float, n_rows: int, n_cols: int):
+        """Pixels (rows, cols) whose centres lie inside the circle of ``diameter`` at
+        continuous position (x = column, y = row), clipped to the frame. The pixel
+        under the cursor is always included, so even a 1-px brush erases something."""
+        r = max(diameter, 1.0) / 2.0
+        c0, c1 = int(np.floor(x - r)), int(np.ceil(x + r)) + 1
+        r0, r1 = int(np.floor(y - r)), int(np.ceil(y + r)) + 1
+        cc, rr = np.meshgrid(np.arange(c0, c1), np.arange(r0, r1))
+        keep = ((cc + 0.5 - x) ** 2 + (rr + 0.5 - y) ** 2) < r * r
+        keep |= (cc == int(np.floor(x))) & (rr == int(np.floor(y)))
+        cc, rr = cc[keep], rr[keep]
+        ok = (cc >= 0) & (cc < n_cols) & (rr >= 0) & (rr < n_rows)
+        return rr[ok], cc[ok]
+
+    def _erase_raw(self, rows: np.ndarray, cols: np.ndarray) -> int:
+        """Clear the given RAW pixels from both mask layers; records them for undo in the
+        open stroke. Returns how many mask pixels were actually cleared."""
+        if self._mask is None or self._image is None or len(rows) == 0:
+            return 0
+        shape = self._image.shape
+        if self._erase_stroke is None:
+            self._erase_stroke = {"c": [], "d": []}
+        flat = rows * shape[1] + cols
+        cleared = 0
+        for key, layer in (("c", self._computed_mask), ("d", self._drawn_mask)):
+            if layer is None or layer.shape != shape:
+                continue
+            hit = layer[rows, cols]
+            if hit.any():
+                layer[rows[hit], cols[hit]] = False
+                self._erase_stroke[key].append(flat[hit])
+        # keep the displayed final mask in step without rebuilding it per mouse event
+        if self._mask.shape == shape:
+            before = int(self._mask[rows, cols].sum())
+            new = np.zeros(len(rows), dtype=bool)
+            for layer in (self._computed_mask, self._drawn_mask):
+                if layer is not None and layer.shape == shape:
+                    new |= layer[rows, cols]
+            self._mask[rows, cols] = new.astype(self._mask.dtype)
+            cleared = before - int(new.sum())
+        return cleared
+
+    def _erase_at(self, x: float, y: float) -> int:
+        """Erase under the brush at painted-frame position (x = column, y = row)."""
+        if self._image is None:
+            return 0
+        n_rows, n_cols = self._disp_shape()
+        rr, cc = self._disc_indices(x, y, self._erase_diameter(), n_rows, n_cols)
+        rows, cols = self._painted_to_raw(cc, rr)
+        n = self._erase_raw(rows, cols)
+        if n:
+            self._erase_timer.start()          # coalesce repaints while dragging
+        return n
+
+    def _erase_refresh(self) -> None:
+        """Light repaint during a drag: overlay + counts, without announcing the mask."""
+        if self._mask is None:
+            return
+        n_bad = int(self._mask.sum()); n_tot = self._mask.size
+        self._stat_lbl.setText(
+            f"Bad pixels: {n_bad:,} / {n_tot:,} ({100 * n_bad / n_tot:.2f}%)   (erasing…)")
+        self._paint_overlay()
+
+    def _erase_end_stroke(self) -> None:
+        """Close the open stroke: rebuild + announce the final mask once, push undo."""
+        stroke, self._erase_stroke = self._erase_stroke, None
+        self._erase_timer.stop()
+        if not stroke:
+            return
+        item = {k: (np.concatenate(v) if v else np.empty(0, dtype=np.int64))
+                for k, v in stroke.items()}
+        if not (len(item["c"]) or len(item["d"])):
+            return
+        self._emit_final()
+        self._erase_undo.append(item)
+        del self._erase_undo[:-50]             # indices only, but bound it anyway
+        self._update_undo_btn()
+
+    def _update_undo_btn(self) -> None:
+        self._erase_undo_btn.setEnabled(bool(self._erase_undo))
+
+    def _undo_erase(self) -> bool:
+        """Put back the pixels of the most recent finished erase stroke."""
+        if not self._erase_undo or self._image is None:
+            return False
+        item = self._erase_undo.pop()
+        shape = self._image.shape
+        for key, layer in (("c", self._computed_mask), ("d", self._drawn_mask)):
+            if layer is not None and layer.shape == shape and len(item[key]):
+                np.put(layer, item[key], True)
+        self._emit_final()
+        self._update_undo_btn()
+        return True
+
+    def agent_erase(self, centers, diameter: Optional[float] = None) -> int:
+        """Erase circles of ``diameter`` px (default: the slider) centred at each
+        ``(x, y)`` in RAW detector coordinates (x = column, y = row, pixel (c, r) covers
+        [c, c+1]) as ONE undoable stroke. Returns the number of mask pixels cleared."""
+        if self._image is None:
+            raise ValueError("load an image first")
+        if self._mask is None:
+            raise ValueError("there is no mask to erase")
+        d = float(diameter) if diameter is not None else self._erase_diameter()
+        if not d >= 1:
+            raise ValueError("size must be >= 1 pixel")
+        n_rows, n_cols = self._image.shape
+        total = 0
+        self._erase_stroke = None
+        for c in centers or []:
+            x, y = float(c[0]), float(c[1])
+            rr, cc = self._disc_indices(x, y, d, n_rows, n_cols)
+            total += self._erase_raw(rr, cc)
+        self._erase_end_stroke()
+        return total
+
     # ── Single-pixel point picking ────────────────────────────────
 
     def _toggle_point_mode(self, on: bool):
         if on and not self._guard_draw():
             self._point_btn.setChecked(False); return
+        if on:
+            self._erase_check.setChecked(False)     # both want the left mouse button
         self._point_mode = on
         self._ensure_click_proxy()
 
@@ -1335,6 +1612,8 @@ class MaskTab(QtWidgets.QWidget):
     def _toggle_freeform_mode(self, on: bool):
         if on and not self._guard_draw():
             self._freeform_btn.setChecked(False); return
+        if on:
+            self._erase_check.setChecked(False)
         self._freeform_mode = on
         self._close_shape_btn.setVisible(on)
         if not on:
@@ -1485,6 +1764,7 @@ class MaskTab(QtWidgets.QWidget):
             drawn = _apply_im_trans(drawn.astype(np.uint8),
                                     tuple(reversed(self._disp_codes))).astype(bool)
         self._drawn_mask = drawn
+        self._erase_undo.clear(); self._update_undo_btn()
         self._emit_final()
 
     def _clear_shapes(self):
@@ -1503,6 +1783,7 @@ class MaskTab(QtWidgets.QWidget):
             self._viewer._iv.removeItem(dot)
         self._point_items.clear(); self._points.clear()
         self._drawn_mask = None
+        self._erase_undo.clear(); self._update_undo_btn()
         self._emit_final()
 
     def _save(self):
@@ -1577,6 +1858,7 @@ class MaskTab(QtWidgets.QWidget):
             # through _set_mask, which would dilate it a second time.
             self._computed_mask = mask_array.astype(bool)
             self._drawn_mask = None
+            self._erase_undo.clear(); self._update_undo_btn()
             self._emit_final()
 
     def _load_existing_mask(self):

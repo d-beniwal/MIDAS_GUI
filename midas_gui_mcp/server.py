@@ -6,7 +6,8 @@ send them to the running midas-gui instance's control socket (via
 lives in ``midas_gui/control_api.py`` inside the GUI process itself — see
 that module and ``README.md`` for the wire protocol this speaks.
 
-Run with midas-gui already running with ``MIDAS_GUI_CONTROL=1`` set, then:
+Run with midas-gui already running (its control socket is on by default; it is off
+only with ``--no-agent-control`` / ``MIDAS_GUI_CONTROL=0``), then:
 
     python midas_gui_mcp/server.py
 
@@ -53,7 +54,8 @@ def _call(op: str, **args: Any) -> Any:
             if attempt == 1:
                 return {"ok": False, "error": {
                     "message": "could not reach midas-gui's control socket — is it "
-                               "running with MIDAS_GUI_CONTROL=1?",
+                               "running, and was it started without --no-agent-control "
+                               "or MIDAS_GUI_CONTROL=0?",
                     "type": "connection_failed"}}
 
 
@@ -936,7 +938,8 @@ def mask_get_state() -> Any:
     """Everything the Mask Builder shows: image (path, frame n/N, shape, dtype, range),
     threshold, statistical, stack, spike, cosmic-ray, calibration + azimuthal/learnable,
     dilation, display, the current mask (n_masked, percent, computed vs hand-drawn),
-    drawn shapes, whether a compute is running, and the open project."""
+    drawn shapes, the eraser (enabled, size, undo depth), whether a compute is running, and the open
+    project."""
     return _call("mask.get_state")
 
 
@@ -1039,6 +1042,29 @@ def mask_set_display(show_overlay: Optional[bool] = None, draw_mask: Optional[bo
     """Viewer controls: bad-pixel overlay on/off, the Draw-mask toolbar, log scale, colormap."""
     return _call("mask.set_display", show_overlay=show_overlay, draw_mask=draw_mask, log=log,
                  cmap=cmap)
+
+
+@mcp.tool()
+def mask_set_eraser(enabled: Optional[bool] = None, size: Optional[int] = None) -> Any:
+    """The Eraser checkbox (next to "Draw mask") and its size slider: brush DIAMETER in detector
+    pixels, 1-100, default 2. Switching it on shows the brush circle in the GUI; the mouse itself is
+    not driven — use mask_erase to clear pixels."""
+    return _call("mask.set_eraser", enabled=enabled, size=size)
+
+
+@mcp.tool()
+def mask_erase(centers: list[list[float]], size: Optional[int] = None) -> Any:
+    """Clear mask pixels: a circle of `size` px diameter (default: the slider) at each [x, y] in RAW
+    detector coordinates (x = column, y = row; a pixel's centre is c + 0.5). Edits the computed and
+    hand-drawn parts of the mask, one undoable stroke per call. Re-running mask_compute /
+    mask_apply_shapes rebuilds the mask and drops erasures."""
+    return _call("mask.erase", centers=centers, size=size)
+
+
+@mcp.tool()
+def mask_undo_erase() -> Any:
+    """Undo the last mask_erase / GUI eraser stroke (up to 50 strokes are kept)."""
+    return _call("mask.undo_erase")
 
 
 @mcp.tool()

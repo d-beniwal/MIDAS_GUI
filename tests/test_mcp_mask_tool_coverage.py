@@ -19,6 +19,7 @@ REQUIRED_TOOLS = {
     "mask_set_calibration_methods",  # 4 · azimuthal clip, learnable mask
     "mask_set_postprocess",          # 5 · dilation
     "mask_set_display",              # overlay, draw toggle, log, colormap
+    "mask_set_eraser", "mask_erase", "mask_undo_erase",   # Eraser checkbox, size slider, strokes
     "mask_compute", "mask_wait", "mask_get_job",
     "mask_load_existing", "mask_save", "mask_log_to_project",
     "mask_add_shape", "mask_add_points", "mask_list_shapes", "mask_remove_shape",
@@ -55,7 +56,8 @@ def test_every_widget_of_the_mask_tab_is_reachable():
                "_stack_ed", "_stack_ds_combo", "_stride_spin", "_spike_check", "_spike_sigma",
                "_cosmic_check", "_cosmic_sigma", "_azim_check", "_azim_sigma", "_learn_check",
                "_learn_steps", "_learn_lr", "_learn_sparsity", "_dilation_spin", "_save_edit",
-               "_load_mask_edit", "_show_overlay_check", "_draw_check", "_img_edit", "_h5loc_edit"]
+               "_load_mask_edit", "_show_overlay_check", "_draw_check", "_img_edit", "_h5loc_edit",
+               "_erase_check", "_erase_slider"]
     missing = [w for w in widgets if f"t.{w}." not in ops_src]
     assert not missing, missing
 

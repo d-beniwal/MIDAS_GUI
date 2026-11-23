@@ -4,6 +4,10 @@ Last updated: 2026-11-23 (Mask Builder bad-pixel settings)
 
 ## Now working on
 
+2026-11-23 (eraser): **Mask Builder Eraser** (checkbox + size slider, default 2 px, Undo, brush circle; `mask_erase` / `mask_set_eraser` / `mask_undo_erase`; DECISIONS 2026-11-23 eraser). Not hand-tried on cocoa with a real mouse (offscreen synthetic events only).
+
+2026-11-23 (latest): **agent control (MCP socket) is ON by default**; opt out with `--no-agent-control` or `MIDAS_GUI_CONTROL=0` (DECISIONS 2026-11-23 agent control). Owner-only socket, no hijack of a live one, status-bar indicator. Uncommitted.
+
 2026-11-23 (gap border): **spatial-outlier mask now gap-aware + edge guard** (DECISIONS 2026-11-23 gap border); lauren `bad_px_project.h5` rebuilt (206,290 px). Uncommitted (the MCP commit 163e429 is pushed).
 
 2026-11-23 (latest): **Mask Builder session** — chose fused silica as the bad-pixel dataset and saved `lauren_data_oct26/bad_px_project.h5` (DECISIONS 2026-11-23). Then **added the full Mask Builder MCP/control API** (`mask_*`, 25 tools; DECISIONS 2026-11-23 later); fixed the set_state double dilation and a polygon-remap crash on pyqtgraph 0.14. Uncommitted on `main`; real MCP server not run (no `mcp` in env). Azimuthal clip untested on real data.

@@ -201,10 +201,26 @@ and integrate run. The active project name is shown in the status bar.
 
 ## Scripting and agent control (MCP)
 
-Setting `MIDAS_GUI_CONTROL=1` when launching opens a local control socket so a
-script or LLM agent can drive the live app (Data Viewer, Calibrate, Solve
-Cell). The proxy and protocol are documented in
-[`midas_gui_mcp/README.md`](midas_gui_mcp/README.md). It is off by default.
+midas-gui opens a local control socket on launch so a script or LLM agent can
+drive the live app (Data Viewer, Calibrate, Solve Cell, Hydra Batch, Mask
+Builder) through the MCP server in [`midas_gui_mcp/`](midas_gui_mcp/README.md).
+**It is on by default**: nothing to set, and the status bar shows
+`Agent control: ready`. The socket is owner-only and local to your machine; it
+does nothing until an MCP server or script connects (the header then shows
+`AGENT CONTROLLED`).
+
+To start without it, use either of:
+
+```bash
+midas-gui --no-agent-control          # also: python launch.py --no-agent-control
+MIDAS_GUI_CONTROL=0 midas-gui         # env var; 0/false/no/off
+```
+
+The status bar then reads `Agent control: off`. If a second midas-gui is
+started while one is already running, the second leaves the socket alone
+(`Agent control: other window`) so it cannot take the agent away from the
+first. The proxy and protocol are documented in
+[`midas_gui_mcp/README.md`](midas_gui_mcp/README.md).
 
 The full user manual — every field, tool tip, and configuration option — is
 in [`documentation/gui_documentation.md`](documentation/gui_documentation.md)

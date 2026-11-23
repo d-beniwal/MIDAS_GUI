@@ -1564,6 +1564,8 @@ class _MaskOps:
             "display": {"show_overlay": t._show_overlay_check.isChecked(),
                         "draw_mask": t._draw_check.isChecked(),
                         "log": t._viewer._log.isChecked(), "cmap": t._viewer._cmap.currentText()},
+            "eraser": {"enabled": t._erase_check.isChecked(), "size": t._erase_slider.value(),
+                       "undo_depth": len(t._erase_undo)},
             "save_path": t._save_edit.text().strip() or None,
             "mask": self._mask_summary(),
             "shapes": t.agent_list_shapes(),
@@ -1792,6 +1794,53 @@ class _MaskOps:
                 t._viewer.set_raw_frame(t._image, t._disp_codes)
                 t._paint_overlay()
         return self._mask_reply("display")
+
+    # ── eraser ──
+    def op_mask_set_eraser(self, enabled=None, size=None) -> dict:
+        """The Eraser checkbox and its size slider (diameter in pixels, 1-100, default 2).
+        Switching it on shows the brush circle for a human watching; to erase from an agent
+        use ``mask_erase`` (the mouse is not driven)."""
+        t = self._mt
+        if size is not None:
+            if not 1 <= int(size) <= 100:
+                return _err("size must be 1..100 pixels", kind="bad_args")
+            t._erase_slider.setValue(int(size))
+        if enabled is not None:
+            if enabled and t._image is None:
+                return _err("load an image first", kind="precondition_failed")
+            t._erase_check.setChecked(bool(enabled))
+        return self._mask_reply("eraser")
+
+    def op_mask_erase(self, centers, size=None) -> dict:
+        """Clear mask pixels inside circles of ``size`` px diameter (default: the slider)
+        centred at each [x, y] in RAW detector coordinates (x = column, y = row; pixel
+        (c, r) covers [c, c+1], so a pixel's centre is c + 0.5). One undoable stroke."""
+        t = self._mt
+        try:
+            pts = [(float(c[0]), float(c[1])) for c in (centers or [])]
+        except Exception:
+            return _err("centers must be [[x, y], ...]", kind="bad_args")
+        if not pts:
+            return _err("centers is empty", kind="bad_args")
+        before = int(np.count_nonzero(t._mask)) if t._mask is not None else 0
+        try:
+            cleared = t.agent_erase(pts, size)
+        except ValueError as e:
+            kind = "bad_args" if "size" in str(e) else "precondition_failed"
+            return _err(e, kind=kind)
+        out = {"cleared": cleared, "masked_before": before}
+        out.update(self._mask_summary())
+        out["undo_depth"] = len(t._erase_undo)
+        return _ok(out)
+
+    def op_mask_undo_erase(self) -> dict:
+        """Put back the pixels of the last erase stroke (the Undo button)."""
+        t = self._mt
+        if not t._undo_erase():
+            return _err("nothing to undo", kind="precondition_failed")
+        out = self._mask_summary()
+        out["undo_depth"] = len(t._erase_undo)
+        return _ok(out)
 
     # ── compute (async) ──
     def op_mask_compute(self) -> dict:

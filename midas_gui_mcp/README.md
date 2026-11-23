@@ -1,4 +1,4 @@
-# midas-gui MCP server (Data Viewer + Calibrate + Solve Cell + Hydra Batch Integrate)
+# midas-gui MCP server (Data Viewer + Calibrate + Solve Cell + Hydra Batch Integrate + Mask Builder)
 
 Lets an LLM agent — this one, or any other framework that speaks MCP —
 drive the live midas-gui application instead of a human clicking through
@@ -18,15 +18,28 @@ Python.
 
 ## Running it
 
-1. Start midas-gui with the control socket enabled:
+1. Start midas-gui. The control socket is **on by default** — a normal launch
+   is enough (`midas-gui`, `python launch.py` or `python -m midas_gui`):
 
    ```
-   MIDAS_GUI_CONTROL=1 python launch.py
+   python launch.py
    ```
 
-   This opens a local control socket (off by default for every ordinary
-   user — it's an opt-in, dev-facing capability) and publishes its path to
-   `~/.midas_gui/midas_gui_control_v1.sock_path`. (Deliberately under
+   It opens a local, owner-only control socket and publishes its path to
+   `~/.midas_gui/midas_gui_control_v1.sock_path`. The status bar shows
+   `Agent control: ready`, and the header shows `AGENT CONTROLLED` while a
+   client is attached. To launch **without** it:
+
+   ```
+   midas-gui --no-agent-control      # or: python launch.py --no-agent-control
+   MIDAS_GUI_CONTROL=0 midas-gui     # env var; 0/false/no/off
+   ```
+
+   (`MIDAS_GUI_CONTROL=1` is still accepted as an explicit "on".) The socket
+   is opened by the app's entry point, so a bare `MainWindow()` created in a
+   script or test opens none unless `MIDAS_GUI_CONTROL=1` is set. With two
+   midas-gui windows running, the first keeps the socket; the second does not
+   take it over (status bar: `Agent control: other window`). (Deliberately under
    `$HOME`, not a tempdir — an MCP client's stdio subprocess only inherits a
    small fixed env-var allowlist that excludes `TMPDIR`, so a tempdir-based
    path resolved to the wrong directory inside that subprocess on macOS.)
@@ -145,8 +158,9 @@ APEXA can spawn `midas_gui_mcp/server.py` and complete the MCP handshake
 running yet — the control-socket connection is made lazily, on the first
 actual tool call (see `server.py`'s `_call()`). So:
 
-- Start `midas-gui` with `MIDAS_GUI_CONTROL=1` (step 1 above) before asking
-  the agent to actually drive it, but it's fine to start APEXA first.
+- Start `midas-gui` normally (step 1 above; the socket is on by default,
+  unless it was launched with `--no-agent-control` / `MIDAS_GUI_CONTROL=0`)
+  before asking the agent to actually drive it, but it's fine to start APEXA first.
 - If a tool is called before midas-gui is up (or after it's been closed),
   every `data_viewer_*`/`calibrate_*` tool call returns a normal MCP tool
   result — not a crash — with
@@ -283,10 +297,10 @@ dialog cannot block the control socket.
 
 `mask.*` (MCP tools `mask_*`) drive the Mask Builder tab one control group at a time: `set_image`,
 `set_frame`, `set_threshold`, `set_statistical`, `set_stack`, `set_spike`, `set_cosmic_ray`,
-`set_calibration`, `set_calibration_methods`, `set_postprocess`, `set_display`; `compute` returns a
+`set_calibration`, `set_calibration_methods`, `set_postprocess`, `set_display`, `set_eraser`; `compute` returns a
 `job_id` for `mask.wait` / `mask.get_job`; `load_existing`, `save`, `log_to_project`, `get_array`;
 hand-drawn regions via `add_shape`, `add_points`, `list_shapes`, `remove_shape`, `clear_shapes`,
-`apply_shapes`; everything read back with `get_state`. The tab's dialogs are recorded, not shown, while the
+`apply_shapes`; clearing mask pixels with `erase` / `undo_erase` (the Eraser brush); everything read back with `get_state`. The tab's dialogs are recorded, not shown, while the
 control API is attached (`MaskTab.set_agent_mode`). `project.save` stores the tab's settings and mask.
 `tests/test_mcp_mask_tool_coverage.py` fails if a control has no tool.
 

@@ -24,6 +24,10 @@ drives the Mask Builder tab itself (the tab comes to the front), so you can watc
    was skipped, e.g. temporal constancy with no stack, is a warning, not a failure).
 6. Hand-drawn regions: `mask_add_shape` / `mask_add_points`, then `mask_apply_shapes` (ORs them into the
    mask). `mask_list_shapes`, `mask_remove_shape`, `mask_clear_shapes` (also drops the drawn part of the mask).
+   **Eraser:** `mask_erase(centers, size)` clears mask pixels inside circles of `size` px diameter (default 2,
+   the slider) at raw [x, y] positions — one undoable stroke per call (`mask_undo_erase`, 50 deep); it edits
+   the computed and hand-drawn parts, so a later `mask_compute` / `mask_apply_shapes` rebuilds the mask and
+   drops erasures. `mask_set_eraser(enabled, size)` only shows/hides the GUI brush for a human watching.
 7. Output: `mask_save(path)` (TIFF, uint8, 1 = bad), `mask_get_array` (a `.npy` reference to read with numpy),
    `project_save` (stores the tab's settings and the mask; see `midas-gui-mcp-project`) and
    `mask_log_to_project` (adds a mask attempt to the open project).

@@ -133,28 +133,59 @@ class MainWindow(QtWidgets.QMainWindow):
             self._on_auto_attenuation_refresh_request, log_fn=_log)
         self._auto_att_refresh_server.start()
 
-        # Lets an external agent/MCP server drive the Data Viewer and
-        # Calibrate tabs headlessly — see midas_gui/control_server.py and
-        # midas_gui_mcp/. Opt-in only (MIDAS_GUI_CONTROL=1): this opens a
-        # local control socket, so it stays off for every ordinary user.
+        # Lets an external agent/MCP server drive the app (Data Viewer, Calibrate,
+        # Solve Cell, Hydra Batch, Mask Builder) — see midas_gui/control_server.py
+        # and midas_gui_mcp/. The real entry point (``main()``) turns it ON by
+        # default and offers ``--no-agent-control`` / ``MIDAS_GUI_CONTROL=0`` to opt
+        # out; a bare ``MainWindow()`` (every test, any embedding) opens NO socket
+        # unless ``MIDAS_GUI_CONTROL=1`` is set, so constructing windows never
+        # fights over the one well-known socket name.
         self._control_server = None
         if os.environ.get("MIDAS_GUI_CONTROL") == "1":
             self._ensure_control_server()
+        else:
+            self._update_agent_status()
 
     def _ensure_control_server(self) -> bool:
         """Start the control socket if it isn't already running. Idempotent —
         a second call while it's already up is a no-op success. Shared by the
-        MIDAS_GUI_CONTROL=1 startup path above and Tools ▸ APEXA (CLI)…, which
-        requests control on demand rather than requiring the env var."""
+        default startup path in ``main()``, the MIDAS_GUI_CONTROL=1 path above
+        and Tools ▸ APEXA (CLI)…, which requests control on demand."""
         if self._control_server is not None:
             return True
         self._control_server = control_server.ControlServer(self, log_fn=_log)
         if self._control_server.start():
             self._view_tab.liveProfileUpdated.connect(self._on_live_profile_updated)
             self._control_server.agentConnected.connect(self._on_agent_connected_changed)
+            self._update_agent_status()
             return True
+        taken = self._control_server.already_running
         self._control_server = None
+        self._update_agent_status(taken_by_other=taken)
         return False
+
+    def _update_agent_status(self, taken_by_other: bool = False) -> None:
+        """Status-bar indicator for the control socket: it is on by default, so
+        the user can always see whether an agent *could* attach, and how to turn it off."""
+        lbl = getattr(self, "_agent_status_lbl", None)
+        if lbl is None:
+            return
+        off_how = ("To start midas-gui without it: `midas-gui --no-agent-control` "
+                   "(or set MIDAS_GUI_CONTROL=0).")
+        if self._control_server is not None:
+            lbl.setText("Agent control: ready")
+            lbl.setToolTip("An MCP server / script can drive this window over a local, "
+                           "owner-only socket:\n" + str(self._control_server.socket_path)
+                           + "\n" + off_how)
+        elif taken_by_other:
+            lbl.setText("Agent control: other window")
+            lbl.setToolTip("Another midas-gui already owns the agent-control socket; "
+                           "agents drive that window, not this one.")
+        else:
+            lbl.setText("Agent control: off")
+            lbl.setToolTip("No agent-control socket in this window. It is on by default; "
+                           "this window was started without it (--no-agent-control or "
+                           "MIDAS_GUI_CONTROL=0), or it failed to start (see the log).")
 
     def _on_live_profile_updated(self, r_px, profile) -> None:
         self._control_server.broadcast_event(
@@ -486,6 +517,9 @@ class MainWindow(QtWidgets.QMainWindow):
             "The currently-open FAIR provenance project file (File → New/Open Project…).\n"
             "Calibrate and Batch Integrate runs are logged to it automatically while open.")
         self.statusBar().addPermanentWidget(self._project_lbl)
+        self._agent_status_lbl = QtWidgets.QLabel("Agent control: off")
+        self._agent_status_lbl.setStyleSheet(f"color: {S.MUTED}; padding-right: 8px;")
+        self.statusBar().addPermanentWidget(self._agent_status_lbl)
 
     def _pull_geometry_from_calibrate(self):
         """Data Viewer's "← Get" — copy the Calibrate tab's latest calibrated
@@ -1873,7 +1907,25 @@ def _apply_ui_scale():
     _log(f"UI scale (QT_SCALE_FACTOR) = {scale:.4g}")
 
 
+_AGENT_CONTROL_OFF_VALUES = ("0", "false", "no", "off")
+
+
+def agent_control_requested(argv, environ=None) -> bool:
+    """Whether this launch should open the agent-control (MCP) socket.
+
+    ON by default. Opt out with ``--no-agent-control`` (removed from ``argv`` so Qt never
+    sees it) or ``MIDAS_GUI_CONTROL`` set to 0/false/no/off. The flag wins over the
+    environment; ``MIDAS_GUI_CONTROL=1`` is just the (still accepted) explicit "on"."""
+    environ = os.environ if environ is None else environ
+    if "--no-agent-control" in argv:
+        while "--no-agent-control" in argv:
+            argv.remove("--no-agent-control")
+        return False
+    return str(environ.get("MIDAS_GUI_CONTROL", "")).strip().lower() not in _AGENT_CONTROL_OFF_VALUES
+
+
 def main():
+    want_control = agent_control_requested(sys.argv)
     _install_diagnostics()
     _apply_ui_scale()   # must precede QApplication construction
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
@@ -1881,6 +1933,8 @@ def main():
     S.apply_theme(app, _CHECKMARK_SVG, _ARROW_UP_SVG, _ARROW_DOWN_SVG)
 
     win = MainWindow()
+    if want_control:
+        win._ensure_control_server()
     win.show()
     # Only the real app entry point offers to restore a crash-recovery draft —
     # never bare `MainWindow()` construction (every test does exactly that),

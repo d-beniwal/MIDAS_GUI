@@ -59,7 +59,7 @@ class ControlServer(QtCore.QObject):
     #: Fires True on the first client connecting (agent control begins) and
     #: False once the last one disconnects (agent control ends) — the signal
     #: behind the header ribbon's "agent-controlled" badge in app.py. Not
-    #: just "the socket is listening": MIDAS_GUI_CONTROL=1 can be set with no
+    #: just "the socket is listening": the socket is on by default, with no
     #: agent actually attached, which shouldn't claim control is active.
     agentConnected = QtCore.pyqtSignal(bool)
 
@@ -71,17 +71,37 @@ class ControlServer(QtCore.QObject):
         self._server.newConnection.connect(self._on_new_connection)
         self._buffers: dict = {}   # QLocalSocket -> bytes (partial line so far)
         self._sockets: list = []   # connected sockets, for broadcast_event
+        self.already_running = False   # set by start(): another midas-gui owns the socket
+        self.socket_path = None
 
     def start(self, server_name: str = SERVER_NAME) -> bool:
-        """Start listening; returns False (and logs) on failure. Always
-        removes a same-named stale socket file first — see
-        ``BridgeServer.start``'s identical reasoning."""
+        """Start listening; returns False (and logs) on failure.
+
+        The socket is owner-only (``UserAccessOption``): the control socket can drive
+        every tab, and the app now offers it by default, so on a shared machine it must
+        not depend on the umask. If ANOTHER running midas-gui already answers on this
+        name, this one does not take it over (it would silently steal the agent from
+        the window the user is working in) and ``start`` returns False with
+        ``already_running`` set. A stale socket file left by a crash does not answer,
+        so it is removed as before — see ``BridgeServer.start``'s identical reasoning."""
+        self.already_running = False
+        probe = QtNetwork.QLocalSocket()
+        probe.connectToServer(server_name)
+        if probe.waitForConnected(300):
+            probe.disconnectFromServer()
+            self.already_running = True
+            self._log(f"MIDAS control: another midas-gui is already listening on "
+                      f"{server_name!r}; this window is not agent-controllable")
+            return False
+        probe.abort()
         QtNetwork.QLocalServer.removeServer(server_name)
+        self._server.setSocketOptions(QtNetwork.QLocalServer.UserAccessOption)
         if not self._server.listen(server_name):
             self._log(f"MIDAS control: failed to listen on {server_name!r}: "
                       f"{self._server.errorString()}")
             return False
         full_name = self._server.fullServerName()
+        self.socket_path = full_name
         try:
             DISCOVERY_FILE.parent.mkdir(parents=True, exist_ok=True)
             DISCOVERY_FILE.write_text(full_name, encoding="utf-8")
