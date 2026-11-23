@@ -70,15 +70,35 @@ python launch.py
 > `conda install -n base -c conda-forge conda-libmamba-solver libarchive`.
 
 > **Linux/Windows CPU note:** the pinned `torch==2.4.0` comes from pip; on
-> Linux/Windows the default PyPI wheel is CUDA-enabled (large). For a lean
-> CPU-only install, after the environment is created run:
+> Linux/Windows the default PyPI wheel is CUDA-enabled (large; Linux also pulls
+> ~2 GB of `nvidia-*` packages). For a lean CPU-only install, after the
+> environment is created run:
 > `pip install torch==2.4.0 --index-url https://download.pytorch.org/whl/cpu`
+
+> **Run these commands from the repository root.** `environment.yml` and
+> `requirements.txt` install the bundled `wheels/midas_index-*.whl` by relative
+> path (PyPI only ships `midas-index` as source needing CMake + a C compiler,
+> which fails on Windows). `conda env create -f /some/other/dir/environment.yml`
+> will not find it.
+
+> **Platform notes (checked 2026-11-23 with `python check_platform_wheels.py`
+> and conda solves).** Fully supported, binary wheels only, no compiler needed:
+> **Windows x64**, **Linux x86_64**, **macOS Apple Silicon (macOS 14+, needed by
+> `pvapy`)**. Not supported as pinned: **Intel Macs** (no `torch==2.4.0`
+> wheel exists; PyTorch stopped at 2.2.2) and **Linux ARM64** (no `numcodecs`
+> 0.15.2 wheel, so pip would compile it). On **Windows**, a pip failure with
+> "No such file or directory" on a very long path means long paths are off:
+> enable them (`reg add HKLM\SYSTEM\CurrentControlSet\Control\FileSystem /v
+> LongPathsEnabled /t REG_DWORD /d 1 /f`, as admin) or create the environment
+> at a short path, e.g. `conda env create -p C:\envs\midas-gui -f environment.yml`.
+> The embedded APEXA terminal is Unix-only; elsewhere APEXA opens in a normal
+> terminal window.
 
 **Alternative: pip only (no conda).** `requirements.txt` mirrors
 `environment.yml`'s pinned versions for a plain `venv` + pip workflow:
 
 ```bash
-python3.12 -m venv .venv
+python3.12 -m venv .venv        # Windows: py -3.12 -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 python launch.py

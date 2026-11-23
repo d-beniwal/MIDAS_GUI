@@ -8,9 +8,15 @@ name: midas-gui
 # their newer (numba 0.66 / NumPy-2) releases — mixing the two families breaks
 # `torch.from_numpy` ("Numpy is not available").
 
+# conda-forge ONLY (`nodefaults`): every conda dependency below is on conda-forge
+# for win-64 / linux-64 / osx-arm64 (solved 2026-11-23). The `defaults` channel
+# was dropped because (a) fresh Anaconda/Miniconda installs now refuse to use it
+# non-interactively until its Terms of Service are accepted
+# (CondaToSNonInteractiveError), which breaks `conda env create` on new Windows/
+# Linux machines, and (b) mixing it with conda-forge's Qt/pyqt invites conflicts.
 channels:
   - conda-forge
-  - defaults
+  - nodefaults
 
 dependencies:
   - python=3.12
