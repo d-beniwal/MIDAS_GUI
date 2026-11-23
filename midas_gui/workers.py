@@ -991,21 +991,73 @@ class StreamPreviewWorker(QtCore.QThread):
 #  Mask workers
 # ═════════════════════════════════════════════════════════════════════════════
 
-def spatial_outlier_mask(med, stackmax, k_sigma, hot_f, dead_f, overflow):
+def _nan_median_filter(a: np.ndarray, size: int, invalid: np.ndarray) -> np.ndarray:
+    """``median_filter(a, size)`` that ignores ``invalid`` pixels (gaps, dead module rows).
+
+    A plain median over a window that reaches into a gap counts the gap's sentinel (-1)
+    as data and drags the local level down, so pixels next to every gap look "hot". Away
+    from the gaps the result is the ordinary (fast) median; only the pixels whose window
+    touches an invalid pixel get the exact median over their valid neighbours. Invalid
+    pixels, and windows with no valid pixel at all, come back NaN."""
+    import warnings
+    from scipy.ndimage import binary_dilation, median_filter
+    a = np.asarray(a, dtype=np.float64)
+    out = median_filter(np.where(invalid, 0.0, a), size=size)
+    near = binary_dilation(invalid, structure=np.ones((size, size), dtype=bool)) & ~invalid
+    ys, xs = np.nonzero(near)
+    if len(ys):
+        h = size // 2
+        pad = np.pad(np.where(invalid, np.nan, a), h, mode="constant", constant_values=np.nan)
+        win = np.lib.stride_tricks.sliding_window_view(pad, (size, size))
+        for i in range(0, len(ys), 20000):
+            blk = win[ys[i:i + 20000], xs[i:i + 20000]].reshape(-1, size * size)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
+                out[ys[i:i + 20000], xs[i:i + 20000]] = np.nanmedian(blk, axis=1)
+    out[invalid] = np.nan
+    return out
+
+
+def spatial_outlier_mask(med, stackmax, k_sigma, hot_f, dead_f, overflow,
+                         invalid=None, guard_px: int = 0, guard_factor: float = 2.0):
     """Spatial outlier mask (template_auto_mask_unconstrained.ipynb approach).
 
     5×5 median residual → 15×15 robust local MAD → Z-score → hot/dead/sat gates.
     Returns (mask_bool, breakdown_str).
-    """
-    from scipy.ndimage import median_filter
+
+    ``invalid`` (bool, same shape) marks pixels that are not data — the threshold mask's
+    gaps and dead pixels. When given, both local medians skip them, so a gap no longer
+    biases its neighbours. ``guard_px`` > 0 additionally holds pixels within that many
+    pixels of an invalid one to a stricter test: hot only above ``guard_factor`` × local,
+    dead only below 1/``guard_factor`` ×. Pixels on a sensor-module edge respond
+    systematically ~1.3-2× their neighbours (a physical edge effect, not a defect), so
+    the ordinary hot/dead gates would flag a dotted line along every gap."""
+    from scipy.ndimage import binary_dilation, median_filter
     med = med.astype(np.float64)
-    mf = median_filter(med, size=5)
-    resid = med - mf
-    local_scale = median_filter(np.abs(resid), size=15) * 1.4826 + 1e-6
-    z = resid / local_scale
-    mf_safe = np.clip(mf, 1e-9, None)
-    hot  = (z >  k_sigma) & (med > hot_f  * mf_safe)
-    dead = (z < -k_sigma) & (med < dead_f * mf_safe)
+    if invalid is not None and np.any(invalid):
+        invalid = np.asarray(invalid, dtype=bool)
+        mf = _nan_median_filter(med, 5, invalid)
+        resid = med - mf
+        local_scale = _nan_median_filter(np.abs(resid), 15, invalid | ~np.isfinite(resid)) * 1.4826 + 1e-6
+        hot_f_map, dead_f_map = hot_f, dead_f
+        if guard_px and guard_px > 0:
+            edge = binary_dilation(invalid, structure=np.ones((3, 3), dtype=bool),
+                                   iterations=int(guard_px)) & ~invalid
+            g = max(float(guard_factor), 1.0)
+            hot_f_map = np.where(edge, max(hot_f, g), hot_f)
+            dead_f_map = np.where(edge, min(dead_f, 1.0 / g), dead_f)
+        valid = ~invalid
+    else:
+        mf = median_filter(med, size=5)
+        resid = med - mf
+        local_scale = median_filter(np.abs(resid), size=15) * 1.4826 + 1e-6
+        hot_f_map, dead_f_map = hot_f, dead_f
+        valid = np.ones(med.shape, dtype=bool)
+    with np.errstate(invalid="ignore"):
+        z = resid / local_scale
+        mf_safe = np.clip(mf, 1e-9, None)
+        hot  = (z >  k_sigma) & (med > hot_f_map  * mf_safe) & valid
+        dead = (z < -k_sigma) & (med < dead_f_map * mf_safe) & valid
     sat  = (stackmax >= overflow) if overflow is not None else np.zeros_like(med, dtype=bool)
     mask = hot | dead | sat
     info = (f"hot: {int(hot.sum()):,}  dead: {int(dead.sum()):,}  sat: {int(sat.sum()):,}")
@@ -1113,7 +1165,11 @@ class _MaskComputeWorkerImpl(QtCore.QThread):
                     self.progress.emit("Statistical spatial-outlier detection…")
                     mask, info = spatial_outlier_mask(
                         med, stackmax, stat["k_sigma"], stat["hot_factor"],
-                        stat["dead_factor"], stat.get("overflow"))
+                        stat["dead_factor"], stat.get("overflow"),
+                        # gaps / dead pixels from the threshold step are not data
+                        invalid=self._base.astype(bool),
+                        guard_px=int(stat.get("gap_guard", 0) or 0),
+                        guard_factor=float(stat.get("gap_factor", 2.0)))
                     combined |= mask
                     parts.append(f"spatial({info})")
 

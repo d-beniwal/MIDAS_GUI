@@ -1542,7 +1542,9 @@ class _MaskOps:
                             "temporal": t._temporal_check.isChecked(),
                             "k_sigma": t._k_sigma.value(), "hot_factor": t._hot_factor.value(),
                             "dead_factor": t._dead_factor.value(),
-                            "frozen_frac": t._frozen_frac.value()},
+                            "frozen_frac": t._frozen_frac.value(),
+                            "gap_guard_px": t._gap_guard.value(),
+                            "gap_guard_factor": t._gap_factor.value()},
             "stack": {"path": t._stack_ed.text().strip() or None,
                       "dataset": (t._stack_ds_combo.currentText().split("   ")[0].strip()
                                   if t._stack_ds_row.isVisibleTo(t) else None),
@@ -1646,11 +1648,20 @@ class _MaskOps:
 
     # ── 2 · statistical ──
     def op_mask_set_statistical(self, spatial=None, temporal=None, k_sigma=None, hot_factor=None,
-                                dead_factor=None, frozen_frac=None) -> dict:
+                                dead_factor=None, frozen_frac=None, gap_guard_px=None,
+                                gap_guard_factor=None) -> dict:
         t = self._mt
         for val, cb in ((spatial, t._spatial_check), (temporal, t._temporal_check)):
             if val is not None:
                 cb.setChecked(bool(val))
+        if gap_guard_px is not None:
+            if not 0 <= int(gap_guard_px) <= 10:
+                return _err("gap_guard_px must be 0..10", kind="bad_args")
+            t._gap_guard.setValue(int(gap_guard_px))
+        if gap_guard_factor is not None:
+            if float(gap_guard_factor) < 1:
+                return _err("gap_guard_factor must be >= 1", kind="bad_args")
+            t._gap_factor.setValue(float(gap_guard_factor))
         for val, w in ((k_sigma, t._k_sigma), (hot_factor, t._hot_factor),
                        (dead_factor, t._dead_factor), (frozen_frac, t._frozen_frac)):
             if val is not None:

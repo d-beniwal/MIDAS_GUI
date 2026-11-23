@@ -44,8 +44,11 @@ through the Data Viewer's flips/transposes. A mask TIFF is always raw-frame too.
   pixels that were off by >25 % in two independent datasets. Keep `dilation` 0 unless neighbours are bad.
 - Spike and cosmic-ray flagged 100k+ real-structure pixels on a theta scan; leave them off unless the data is
   static (cosmic-ray: n_sigma >= 8 on a long static stack).
-- The spatial test runs with gap pixels inside its 5x5 window, so ~5 % of what it flags next to gaps are false
-  positives; inspect gap edges rather than trusting them.
+- **Gap edges.** The local medians ignore the threshold mask's gap pixels, and pixels within `gap_guard_px`
+  (default 1) of a gap need `gap_guard_factor` (default 2.0) x their neighbours to be flagged. Module-edge pixels
+  respond ~1.3-2x normally (12 % of them exceed 1.25x vs 0.1 % in the interior, but only 0.04 % exceed 2x), so
+  without the guard a dotted line of "bad" pixels follows every gap. Keep the guard unless you know the edge
+  pixels are bad; the gap pixels must be in the threshold mask (`lower=0`) for it to find them.
 
 ## Errors
 

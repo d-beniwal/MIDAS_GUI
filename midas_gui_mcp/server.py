@@ -969,13 +969,18 @@ def mask_set_threshold(lower: Optional[float] = None, upper: Optional[float] = N
 def mask_set_statistical(spatial: Optional[bool] = None, temporal: Optional[bool] = None,
                          k_sigma: Optional[float] = None, hot_factor: Optional[float] = None,
                          dead_factor: Optional[float] = None,
-                         frozen_frac: Optional[float] = None) -> Any:
+                         frozen_frac: Optional[float] = None, gap_guard_px: Optional[int] = None,
+                         gap_guard_factor: Optional[float] = None) -> Any:
     """2 · Statistical auto-mask. spatial = outlier vs local 5x5 median (robust Z > k_sigma AND
     pixel > hot_factor x local median = hot, or < dead_factor x = dead); uses the Stack's
     temporal median, else the single image. temporal = frozen pixels (std < frozen_frac x Q75
-    of std; needs a Stack of >= 2 frames). Defaults 6 / 1.5 / 0.5 / 0.05."""
+    of std; needs a Stack of >= 2 frames). Defaults 6 / 1.5 / 0.5 / 0.05.
+    Gap border: the local medians ignore the threshold mask's gap/dead pixels, and pixels within
+    gap_guard_px (default 1; 0 = off) of one are flagged only beyond gap_guard_factor (default 2.0)
+    x their neighbours, because sensor-module edge pixels respond ~1.3-2x normally."""
     return _call("mask.set_statistical", spatial=spatial, temporal=temporal, k_sigma=k_sigma,
-                 hot_factor=hot_factor, dead_factor=dead_factor, frozen_frac=frozen_frac)
+                 hot_factor=hot_factor, dead_factor=dead_factor, frozen_frac=frozen_frac,
+                 gap_guard_px=gap_guard_px, gap_guard_factor=gap_guard_factor)
 
 
 @mcp.tool()

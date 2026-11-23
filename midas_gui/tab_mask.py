@@ -396,7 +396,19 @@ class MaskTab(QtWidgets.QWidget):
         # spatial-only parameters
         self._spatial_params = QtWidgets.QWidget()
         spv = QtWidgets.QVBoxLayout(self._spatial_params); spv.setContentsMargins(0, 0, 0, 0); spv.setSpacing(4)
+        self._gap_guard = _NoScrollSpinBox(); self._gap_guard.setRange(0, 10); self._gap_guard.setValue(1)
+        self._gap_guard.setToolTip(
+            "Pixels within this many pixels of a masked gap / dead pixel (the Threshold\n"
+            "mask) are held to the stricter Edge × test below. Sensor-module edge pixels\n"
+            "respond ~1.3-2× their neighbours (a physical edge effect), so the ordinary\n"
+            "Hot/Dead gates would flag a dotted line along every gap. 0 = off.\n"
+            "Local medians always ignore the gap pixels themselves.")
+        self._gap_factor = _fspin(1.0, 1000.0, 2, 2.0)
+        self._gap_factor.setToolTip(
+            "Edge ×: a gap-border pixel is hot only above this × its valid neighbours,\n"
+            "dead only below 1/this ×. Real defects there are far beyond the edge effect.")
         sf = S.Form(); sf.row(("K_σ:", self._k_sigma), ("Hot:", self._hot_factor)); sf.row(("Dead:", self._dead_factor))
+        sf.row(("Gap border (px):", self._gap_guard), ("Edge ×:", self._gap_factor))
         spv.addLayout(sf)
         awf.addWidget(self._spatial_params)
         # temporal-only parameter
@@ -974,6 +986,8 @@ class MaskTab(QtWidgets.QWidget):
                 "hot_factor": self._hot_factor.value(),
                 "dead_factor": self._dead_factor.value(),
                 "frozen_frac": self._frozen_frac.value(),
+                "gap_guard": self._gap_guard.value(),
+                "gap_factor": self._gap_factor.value(),
                 "overflow": upper if upper > 0 else None,
             }
         if self._spike_check.isChecked():
@@ -1594,6 +1608,8 @@ class MaskTab(QtWidgets.QWidget):
             "hot_factor": self._hot_factor,
             "dead_factor": self._dead_factor,
             "frozen_frac": self._frozen_frac,
+            "gap_guard": self._gap_guard,
+            "gap_factor": self._gap_factor,
             "stack_ed": self._stack_ed,
             "stack_ds_combo": self._stack_ds_combo,
             "stride_spin": self._stride_spin,

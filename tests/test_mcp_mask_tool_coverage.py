@@ -51,7 +51,7 @@ def test_every_widget_of_the_mask_tab_is_reachable():
     ops_src = (REPO / "midas_gui" / "control_api.py").read_text()
     ops_src = ops_src[ops_src.index("class _MaskOps"):ops_src.index("class GuiController")]
     widgets = ["_lower", "_upper", "_thresh_proj_combo", "_thresh_skip", "_spatial_check",
-               "_temporal_check", "_k_sigma", "_hot_factor", "_dead_factor", "_frozen_frac",
+               "_temporal_check", "_k_sigma", "_hot_factor", "_dead_factor", "_frozen_frac", "_gap_guard", "_gap_factor",
                "_stack_ed", "_stack_ds_combo", "_stride_spin", "_spike_check", "_spike_sigma",
                "_cosmic_check", "_cosmic_sigma", "_azim_check", "_azim_sigma", "_learn_check",
                "_learn_steps", "_learn_lr", "_learn_sparsity", "_dilation_spin", "_save_edit",
