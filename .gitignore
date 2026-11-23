@@ -35,6 +35,7 @@ htmlcov/
 
 # Distribution
 *.whl
+!/wheels/*.whl
 *.tar.gz
 
 # Jupyter
@@ -59,8 +60,15 @@ htmlcov/
 # --basetemp both land here) — never anything worth keeping, safe to wipe.
 .scratch/
 
-# Provider runtime state is local; portable project memory lives in .context/.
+# Per-machine MCP client registration must never sit in the checkout.
+/.mcp.json
+
+# Agent / AI-assistant files are per-user and local. A user's agent edits them
+# in place, which blocks `git pull`, so they are not tracked.
 /.claude/
+/AGENTS.md
+/CLAUDE.md
+/.context/
 
 # ── Shipped sample data ──────────────────────────────────────────────────────
 # Only test_data/gui_synthetic/ ships with the repo so the GUI works out of the

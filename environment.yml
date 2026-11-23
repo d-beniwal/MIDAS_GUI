@@ -201,7 +201,15 @@ dependencies:
     # 0.9.0->0.10.0 (numpy>=1.22, torch>=2.0, satisfied by the pins above).
     - "midas-ddd==0.1.2"
     - "midas-diffract==0.10.0"
-    - "midas-index==0.10.0"
+    # midas-index: installed from the BUNDLED pure-Python wheel in wheels/ (see
+    # wheels/README.md), NOT from PyPI. PyPI has only an sdist for 0.5.x+
+    # (scikit-build-core + CMake, optional C indexer), so pip must compile it --
+    # that fails on Windows without MSVC Build Tools ("'nmake' '-?' failed") and
+    # needs cmake + a compiler elsewhere. midas-gui never imports midas_index
+    # (midas-defect only declares it), so the Python-only build loses nothing.
+    # The path is relative: run `conda env create -f environment.yml` from the
+    # repo root (as the README does).
+    - ./wheels/midas_index-0.11.0-py3-none-any.whl
     - "midas-invert==0.2.0"
     # Was previously unpinned/floating in this repo (no prior pandas line
     # here or in requirements.txt) -- installing midas-defect pulled latest

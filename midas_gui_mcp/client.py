@@ -14,17 +14,57 @@ package independent of midas-gui's own (heavily pinned) scientific-stack
 dependencies, and demonstrates the wire protocol isn't PyQt-locked — any
 language/framework that can open a Unix domain socket and speak
 newline-delimited JSON can be a client. See README.md for the protocol.
+
+**Windows:** Qt's ``QLocalServer`` listens on a *named pipe* there
+(``\\\\.\\pipe\\midas_gui_control_v1``), not a Unix socket, so the discovery
+file holds a pipe name and ``_PipeTransport`` talks to it with plain file I/O
+(stdlib only; no ``pywin32``). The pipe has no read timeout.
 """
 from __future__ import annotations
 
 import itertools
 import json
 import socket
+import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
 
 DISCOVERY_FILE = Path.home() / ".midas_gui" / "midas_gui_control_v1.sock_path"
+
+
+class _PipeTransport:
+    """Just enough of a socket (``sendall`` / ``recv`` / ``close``) over a
+    Windows named pipe. Qt's pipes are byte-mode, so a raw unbuffered file
+    handle is a complete client."""
+
+    def __init__(self, path: str):
+        # Qt may publish a bare name or the full \\.\pipe\name form.
+        if not path.startswith("\\\\"):
+            path = "\\\\.\\pipe\\" + path
+        self._f = open(path, "r+b", buffering=0)
+
+    def sendall(self, data: bytes) -> None:
+        self._f.write(data)
+
+    def recv(self, n: int) -> bytes:
+        return self._f.read(n) or b""
+
+    def settimeout(self, _t) -> None:   # a pipe handle has no timeout
+        pass
+
+    def close(self) -> None:
+        self._f.close()
+
+
+def _open_transport(path: str, timeout: float):
+    """A connected, socket-like object for the GUI's control endpoint."""
+    if sys.platform == "win32":
+        return _PipeTransport(path)
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    sock.connect(path)
+    return sock
 
 
 class ControlError(RuntimeError):
@@ -58,9 +98,7 @@ class ControlClient:
 
     def __init__(self, socket_path: Optional[str] = None, timeout: float = 30.0):
         self._path = socket_path or discover_socket_path()
-        self._sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        self._sock.settimeout(timeout)
-        self._sock.connect(self._path)
+        self._sock = _open_transport(self._path, timeout)
         self._buf = b""
         self._ids = itertools.count(1)
 

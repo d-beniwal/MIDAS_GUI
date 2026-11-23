@@ -197,7 +197,10 @@ dependencies = [
     # (numpy>=1.22, torch>=2.0, satisfied by the pins above).
     "midas-ddd==0.1.2",
     "midas-diffract==0.10.0",
-    "midas-index==0.10.0",
+    # midas-index: PyPI has only an sdist for 0.5.x+ (CMake + compiler), so the
+    # environment installs the bundled pure wheel in wheels/ (see environment.yml).
+    # Floor only here, since a relative wheel path can't be a PEP 508 dependency.
+    "midas-index>=0.4.1",
     "midas-invert==0.2.0",
     # Previously unpinned/floating in this repo -- installing midas-defect
     # pulled latest (3.0.6) with no regressions found against this repo's own

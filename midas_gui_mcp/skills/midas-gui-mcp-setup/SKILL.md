@@ -22,11 +22,10 @@ that work.
    the flag. If the status bar says `Agent control: other window`, a second midas-gui is
    running and the agent drives the FIRST one; close it or the extra window.
 3. **Server registered with the client:** `claude mcp list` should show
-   `midas-gui`. If not:
-   `claude mcp add --transport stdio midas-gui -- <venv>/bin/python <repo>/midas_gui_mcp/server.py`
-   (venv from `midas_gui_mcp/requirements.txt`; it does not need the GUI's
-   own scientific stack). **Restart the client session** after registering;
-   tools do not appear mid-session.
+   `midas-gui`. If not, run `python midas_gui_mcp/install.py --register`
+   (any OS; makes a venv under `~/.midas_gui/mcp-venv` and registers at
+   `--scope user`). **Restart the client session** after registering; tools do
+   not appear mid-session.
 4. **New ops need a GUI restart.** Ops live in `midas_gui/control_api.py`
    inside the GUI process. After editing it, restart the GUI and the client.
 
@@ -45,6 +44,14 @@ Op names are the tool names with the first `_` as `.`
 `python -I` from a scratch directory, not from a data folder.
 
 ## Rules
+
+- **Setup is read-only for the repo.** Never edit, commit or stash tracked files
+  in the midas-gui checkout to get the MCP server working (not `server.py`,
+  `client.py`, the skills, the README, `.context/`), never use
+  `claude mcp add --scope project` (writes `.mcp.json`), and do not append to
+  `.context/STATE.md` / `DECISIONS.md` for a setup task. A user's `git pull`
+  breaks on any locally modified tracked file. If something needs a code
+  change, tell the user instead.
 
 - Tools are not exposed to GUI-only controls: if a button has no tool, say so
   rather than hunting for a workaround. Offer to add an op instead.

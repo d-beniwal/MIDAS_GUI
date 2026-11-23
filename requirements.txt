@@ -169,7 +169,11 @@ midas-defect==0.9.0
 # explicitly for the same reproducibility reason as the block above.
 midas-ddd==0.1.2
 midas-diffract==0.10.0
-midas-index==0.10.0
+# midas-index: bundled pure-Python wheel (see wheels/README.md) because PyPI only
+# has an sdist for 0.5.x+ that needs CMake + a compiler (fails on Windows without
+# MSVC). Unused by midas-gui itself. Run `pip install -r requirements.txt` from
+# the repo root (the path is relative).
+./wheels/midas_index-0.11.0-py3-none-any.whl
 midas-invert==0.2.0
 # Was previously unpinned/floating in this repo (no prior pandas line here or
 # in environment.yml) -- installing midas-defect pulled latest (3.0.6) with

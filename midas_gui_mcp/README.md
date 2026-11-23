@@ -44,18 +44,29 @@ Python.
    small fixed env-var allowlist that excludes `TMPDIR`, so a tempdir-based
    path resolved to the wrong directory inside that subprocess on macOS.)
 
-2. In a separate virtualenv (this package deliberately does **not** need
-   midas-gui's own pinned scientific stack):
+2. Set up the server (macOS, Linux and Windows; stdlib-only helper, any
+   Python >= 3.10):
 
    ```
-   cd midas_gui_mcp
-   python -m venv .venv && .venv/bin/pip install -r requirements.txt
-   .venv/bin/python server.py
+   python midas_gui_mcp/install.py --register --skills
    ```
 
-3. Register `midas_gui_mcp/server.py` with your MCP client the normal way
-   (stdio transport, e.g. `claude mcp add --transport stdio midas-gui -- 
-   /path/to/.venv/bin/python /path/to/midas_gui_mcp/server.py`).
+   It creates a virtualenv at `~/.midas_gui/mcp-venv` (this package deliberately
+   does **not** need midas-gui's own pinned scientific stack), runs
+   `claude mcp add --scope user midas-gui -- <venv python> <repo>/midas_gui_mcp/server.py`,
+   and copies the agent skills to `~/.claude/skills`. Drop `--register` to just
+   print the command for another MCP client. Restart the client session afterwards.
+
+   **It never writes inside the repo checkout** — keep it that way (see below),
+   or `git pull` will hit locally-modified files.
+
+   > **Do not** run `claude mcp add` with `--scope project` (it creates
+   > `.mcp.json` in the current directory), and do not edit any tracked file in
+   > the checkout (`server.py`, `README.md`, `skills/`, `.context/`) to make
+   > setup work. Per-machine paths belong in your user-level config.
+
+   On Windows the control channel is a named pipe rather than a Unix socket;
+   `client.py` handles both, so nothing differs for you.
 
 ## Agent skills
 
@@ -75,8 +86,9 @@ advertises them in its MCP `instructions` field.
 - `skills/midas-gui-mcp-solve-cell/` — the whole Solve Cell sequence: inputs → suggest/apply
   parameters → ingest → material filter → index/refine → domain loop.
 
-To make them auto-load in Claude Code, symlink each folder into
-`.claude/skills/` (this repo, untracked) or `~/.claude/skills/` (every project).
+To make them auto-load in Claude Code, `install.py --skills` copies them to
+`~/.claude/skills/` (every project; re-run it after pulling skill changes).
+Symlinks work too on macOS/Linux, but need admin/Developer Mode on Windows.
 Update the matching skill when you add or change an op.
 
 ## Wiring this into APEXA
