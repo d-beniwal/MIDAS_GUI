@@ -1474,7 +1474,492 @@ class _HydraBatchOps:
             self._hb_queue_on_finished(page.run_report())
 
 
-class GuiController(_SolveCellOps, _ProjectOps, _HydraBatchOps):
+# ── Mask Builder ─────────────────────────────────────────────────────
+# Mixed into GuiController below. Every op sets the same widget a click would
+# and runs the tab's own methods (``_load_image``, ``_compute``, ``_save`` ...),
+# so the GUI and an agent cannot diverge. ``MaskTab.set_agent_mode`` turns its
+# message boxes into recorded messages (``_agent_msgs``), returned as errors /
+# warnings here.
+
+_MASK_PROJECTIONS = ("Current frame", "Average", "Sum", "Max")
+
+
+class _MaskOps:
+    @property
+    def _mt(self):
+        return self._win._mask_tab
+
+    def _mask_take_msgs(self) -> list:
+        msgs = [f"{title}: {text}" for _k, title, text in self._mt._agent_msgs]
+        self._mt._agent_msgs.clear()
+        return msgs
+
+    @staticmethod
+    def _mask_pick_dataset(combo, dataset: str) -> None:
+        """Select ``dataset`` in an HDF5 dataset combo (items read "name   (shape)")."""
+        for i in range(combo.count()):
+            if combo.itemData(i) == dataset:
+                combo.setCurrentIndex(i)
+                return
+        combo.setEditText(dataset)
+
+    def _mask_summary(self) -> dict:
+        t = self._mt
+        m = t._mask
+        out = {"has_mask": m is not None, "status": t._stat_lbl.text()}
+        if m is not None:
+            n = int(np.count_nonzero(m))
+            out.update({"shape": list(m.shape), "n_masked": n, "n_total": int(m.size),
+                        "percent_masked": round(100.0 * n / m.size, 4),
+                        "n_computed": (int(np.count_nonzero(t._computed_mask))
+                                       if t._computed_mask is not None else 0),
+                        "n_hand_drawn": (int(np.count_nonzero(t._drawn_mask))
+                                         if t._drawn_mask is not None else 0)})
+        return out
+
+    def _mask_state(self) -> dict:
+        t = self._mt
+        img = t._image
+        multi = t._img_frames is not None
+        image = {"path": t._img_edit.text().strip() or None,
+                 "dataset": (t._h5loc_edit.currentText().split("   ")[0].strip()
+                             if t._h5loc_edit.isVisibleTo(t) else None),
+                 "loaded": img is not None, "n_frames": t._img_frames["n"] if multi else 1,
+                 "frame": (t._img_frame_idx + 1) if multi else 1}
+        if img is not None:
+            image.update({"shape": [int(img.shape[0]), int(img.shape[1])],
+                          "dtype": str(t._orig_dtype),
+                          "min": float(np.nanmin(img)), "max": float(np.nanmax(img))})
+        r = t._calib_result
+        proj = getattr(self._win, "_project_ctx", None)
+        return {
+            "image": image,
+            "threshold": {"lower": t._lower.value(), "upper": t._upper.value(),
+                          "projection": t._thresh_proj_combo.currentText(),
+                          "skip_frames": t._thresh_skip.value(),
+                          "note": "lower <= -1e9 disables the lower test, upper <= 0 the upper one"},
+            "statistical": {"spatial": t._spatial_check.isChecked(),
+                            "temporal": t._temporal_check.isChecked(),
+                            "k_sigma": t._k_sigma.value(), "hot_factor": t._hot_factor.value(),
+                            "dead_factor": t._dead_factor.value(),
+                            "frozen_frac": t._frozen_frac.value()},
+            "stack": {"path": t._stack_ed.text().strip() or None,
+                      "dataset": (t._stack_ds_combo.currentText().split("   ")[0].strip()
+                                  if t._stack_ds_row.isVisibleTo(t) else None),
+                      "stride": t._stride_spin.value(),
+                      "explicit_files": len(t._stack_files) if t._stack_files else 0},
+            "spike": {"enabled": t._spike_check.isChecked(), "n_sigma": t._spike_sigma.value()},
+            "cosmic_ray": {"enabled": t._cosmic_check.isChecked(), "n_sigma": t._cosmic_sigma.value()},
+            "calibration": {"available": r is not None,
+                            "Lsd": getattr(r, "Lsd", None) if r is not None else None,
+                            "NrPixelsY": getattr(r, "NrPixelsY", None) if r is not None else None,
+                            "NrPixelsZ": getattr(r, "NrPixelsZ", None) if r is not None else None,
+                            "im_trans": _jsonable(getattr(r, "im_trans", None)) if r is not None else None},
+            "azimuthal": {"enabled": t._azim_check.isChecked(), "n_sigma": t._azim_sigma.value()},
+            "learnable": {"enabled": t._learn_check.isChecked(), "steps": t._learn_steps.value(),
+                          "lr": t._learn_lr.value(), "sparsity": t._learn_sparsity.value()},
+            "postprocess": {"dilation": t._dilation_spin.value()},
+            "display": {"show_overlay": t._show_overlay_check.isChecked(),
+                        "draw_mask": t._draw_check.isChecked(),
+                        "log": t._viewer._log.isChecked(), "cmap": t._viewer._cmap.currentText()},
+            "save_path": t._save_edit.text().strip() or None,
+            "mask": self._mask_summary(),
+            "shapes": t.agent_list_shapes(),
+            "running": bool(t._mask_worker is not None and t._mask_worker.isRunning()),
+            "project": str(proj.path) if proj and getattr(proj, "path", None) else None,
+        }
+
+    def _mask_reply(self, section: str | None = None, **extra) -> dict:
+        """Success reply: the full state (or one section), plus any recorded dialogs."""
+        st = self._mask_state()
+        out = {section: st[section]} if section else st
+        out.update(extra)
+        msgs = self._mask_take_msgs()
+        if msgs:
+            out["messages"] = msgs
+        return _ok(out)
+
+    def _mask_fail(self, message: str, kind: str = "precondition_failed") -> dict:
+        msgs = self._mask_take_msgs()
+        if msgs:
+            message = f"{message} ({'; '.join(msgs)})"
+        return _err(message, kind=kind)
+
+    # ── state ──
+    def op_mask_get_state(self) -> dict:
+        return self._mask_reply()
+
+    # ── image / frame ──
+    def op_mask_set_image(self, path, dataset=None, frame=None) -> dict:
+        """Image field: a TIFF/HDF5/.ge file, a folder of single-frame files, or a
+        multi-frame file. ``frame`` is 1-based (the Frame spinner). Loading resets the
+        upper threshold to the dtype sentinel, so set the threshold AFTER the image."""
+        t = self._mt
+        path = str(path)
+        if not Path(path).exists():
+            return _err(f"not found: {path}", kind="bad_args")
+        t._agent_msgs.clear()
+        t._img_edit.setText(path)
+        if dataset:
+            self._mask_pick_dataset(t._h5loc_edit, str(dataset))
+        t._load_image()
+        if t._agent_msgs or t._image is None:
+            return self._mask_fail(f"could not load {path}")
+        if frame is not None:
+            n = t._img_frames["n"] if t._img_frames is not None else 1
+            if not 1 <= int(frame) <= n:
+                return self._mask_fail(f"frame {frame} out of range 1..{n}", kind="bad_args")
+            if t._img_frames is not None:
+                t._load_frame(int(frame) - 1)
+        return self._mask_reply("image")
+
+    def op_mask_set_frame(self, frame) -> dict:
+        t = self._mt
+        if t._img_frames is None:
+            return _err("the Image is a single frame (no frame navigator)", kind="precondition_failed")
+        n = t._img_frames["n"]
+        if not 1 <= int(frame) <= n:
+            return _err(f"frame {frame} out of range 1..{n}", kind="bad_args")
+        t._load_frame(int(frame) - 1)
+        return self._mask_reply("image")
+
+    # ── 1 · threshold ──
+    def op_mask_set_threshold(self, lower=None, upper=None, projection=None, skip_frames=None) -> dict:
+        t = self._mt
+        if projection is not None:
+            if projection not in _MASK_PROJECTIONS:
+                return _err(f"unknown projection {projection!r} (use {list(_MASK_PROJECTIONS)})",
+                            kind="bad_args")
+            if projection != "Current frame" and t._img_frames is None:
+                return _err("a projection needs a multi-frame Image (folder, stack file); "
+                            "this Image is a single frame", kind="precondition_failed")
+            t._thresh_proj_combo.setCurrentText(projection)
+        if skip_frames is not None:
+            if int(skip_frames) < 0:
+                return _err("skip_frames must be >= 0", kind="bad_args")
+            t._thresh_skip.setValue(int(skip_frames))
+        if lower is not None:
+            t._lower.setValue(float(lower))
+        if upper is not None:
+            t._upper.setValue(float(upper))
+        return self._mask_reply("threshold")
+
+    # ── 2 · statistical ──
+    def op_mask_set_statistical(self, spatial=None, temporal=None, k_sigma=None, hot_factor=None,
+                                dead_factor=None, frozen_frac=None) -> dict:
+        t = self._mt
+        for val, cb in ((spatial, t._spatial_check), (temporal, t._temporal_check)):
+            if val is not None:
+                cb.setChecked(bool(val))
+        for val, w in ((k_sigma, t._k_sigma), (hot_factor, t._hot_factor),
+                       (dead_factor, t._dead_factor), (frozen_frac, t._frozen_frac)):
+            if val is not None:
+                if float(val) < 0:
+                    return _err("parameters must be >= 0", kind="bad_args")
+                w.setValue(float(val))
+        return self._mask_reply("statistical")
+
+    def op_mask_set_stack(self, path=None, dataset=None, stride=None, files=None) -> dict:
+        """Stack used by spatial-outlier (temporal median), temporal-constancy and
+        cosmic-ray: a folder, a glob (``*.tif``), one TIFF/HDF5 file (3-D dataset), or an
+        explicit ``files`` list. ``path=""`` clears it (spatial then uses the single image)."""
+        import glob as _g
+        from midas_gui.helpers import display_text_for_paths
+        t = self._mt
+        if files is not None:
+            files = sorted(str(f) for f in files)
+            if not files:
+                return _err("files is empty (use path='' to clear)", kind="bad_args")
+            missing = [f for f in files if not Path(f).exists()]
+            if missing:
+                return _err(f"not found: {missing[:3]}", kind="bad_args")
+            t._stack_ed.setText(display_text_for_paths(files))
+            t._stack_ed.setToolTip("\n".join(files))
+            t._stack_files = files          # after setText, which clears it
+        elif path is not None:
+            path = str(path)
+            if path and not Path(path).exists() and not _g.glob(path):
+                return _err(f"not found: {path}", kind="bad_args")
+            t._stack_ed.setText(path)
+            if dataset and path:
+                self._mask_pick_dataset(t._stack_ds_combo, str(dataset))
+        elif dataset:
+            self._mask_pick_dataset(t._stack_ds_combo, str(dataset))
+        if stride is not None:
+            if int(stride) < 1:
+                return _err("stride must be >= 1", kind="bad_args")
+            t._stride_spin.setValue(int(stride))
+        return self._mask_reply("stack")
+
+    # ── 3 / 3b · spike and cosmic-ray ──
+    def op_mask_set_spike(self, enabled=None, n_sigma=None) -> dict:
+        t = self._mt
+        if enabled is not None:
+            t._spike_check.setChecked(bool(enabled))
+        if n_sigma is not None:
+            t._spike_sigma.setValue(float(n_sigma))
+        return self._mask_reply("spike")
+
+    def op_mask_set_cosmic_ray(self, enabled=None, n_sigma=None) -> dict:
+        t = self._mt
+        if enabled is not None:
+            t._cosmic_check.setChecked(bool(enabled))
+        if n_sigma is not None:
+            t._cosmic_sigma.setValue(float(n_sigma))
+        return self._mask_reply("cosmic_ray")
+
+    # ── 4 · calibration-based ──
+    def op_mask_set_calibration(self, path=None, from_calibrate: bool = False) -> dict:
+        """Give the Mask tab a calibration (enables azimuthal / learnable): a geometry file
+        (MIDAS paramstest, calibration .json or pyFAI .poni), or the Calibrate tab's latest result."""
+        from midas_gui.helpers import result_ns_from_geometry_file
+        t = self._mt
+        if path:
+            if not Path(str(path)).exists():
+                return _err(f"not found: {path}", kind="bad_args")
+            try:
+                res = result_ns_from_geometry_file(str(path))
+            except Exception as e:
+                return _err(f"unreadable calibration {path!r}: {e}", kind="bad_args")
+        elif from_calibrate:
+            res = self._cal._result
+            if res is None:
+                return _err("the Calibrate tab has no result yet", kind="no_data")
+        else:
+            return _err("pass path=<geometry file> or from_calibrate=true", kind="bad_args")
+        t.set_calibration(res)
+        return self._mask_reply("calibration")
+
+    def op_mask_set_calibration_methods(self, azimuthal=None, azimuthal_n_sigma=None, learnable=None,
+                                        learn_steps=None, learn_lr=None, learn_sparsity=None) -> dict:
+        t = self._mt
+        if (azimuthal or learnable) and t._calib_result is None:
+            return _err("azimuthal / learnable need a calibration — call mask_set_calibration first",
+                        kind="precondition_failed")
+        for val, cb in ((azimuthal, t._azim_check), (learnable, t._learn_check)):
+            if val is not None:
+                cb.setChecked(bool(val))
+        if azimuthal_n_sigma is not None:
+            t._azim_sigma.setValue(float(azimuthal_n_sigma))
+        if learn_steps is not None:
+            t._learn_steps.setValue(int(learn_steps))
+        if learn_lr is not None:
+            t._learn_lr.setValue(float(learn_lr))
+        if learn_sparsity is not None:
+            t._learn_sparsity.setValue(float(learn_sparsity))
+        st = self._mask_state()
+        return _ok({"azimuthal": st["azimuthal"], "learnable": st["learnable"],
+                    "calibration": st["calibration"]})
+
+    # ── 5 · post-processing ──
+    def op_mask_set_postprocess(self, dilation=None) -> dict:
+        if dilation is not None:
+            if not 0 <= int(dilation) <= 50:
+                return _err("dilation must be 0..50", kind="bad_args")
+            self._mt._dilation_spin.setValue(int(dilation))
+        return self._mask_reply("postprocess")
+
+    # ── display ──
+    def op_mask_set_display(self, show_overlay=None, draw_mask=None, log=None, cmap=None) -> dict:
+        t = self._mt
+        if cmap is not None and t._viewer._cmap.findText(str(cmap)) < 0:
+            return _err(f"unknown colormap {cmap!r}", kind="bad_args")
+        if draw_mask and t._image is None:
+            return _err("load an image first", kind="precondition_failed")
+        if show_overlay is not None:
+            t._show_overlay_check.setChecked(bool(show_overlay))
+        if draw_mask is not None:
+            t._draw_check.setChecked(bool(draw_mask))
+        if log is not None or cmap is not None:
+            ds = {}
+            if log is not None:
+                ds["log"] = bool(log)
+            if cmap is not None:
+                ds["cmap"] = str(cmap)
+            t._viewer.set_display_state(ds)
+            if t._image is not None:
+                t._viewer.set_raw_frame(t._image, t._disp_codes)
+                t._paint_overlay()
+        return self._mask_reply("display")
+
+    # ── compute (async) ──
+    def op_mask_compute(self) -> dict:
+        """Compute Mask. Returns a ``job_id`` for ``mask_wait`` / ``mask_get_job`` (a
+        threshold-only run is already done on return). Runs the tab's own ``_compute``."""
+        t = self._mt
+        if t._image is None:
+            return _err("load an image first (mask_set_image)", kind="precondition_failed")
+        prev = self._jobs.get(self._mask_job_id)
+        if prev is not None and prev["status"] == "running":
+            return _err("a mask computation is already running", kind="precondition_failed")
+        job_id = str(uuid.uuid4())
+        self._jobs[job_id] = {"status": "running", "result": None, "error": None, "_log": []}
+        self._mask_job_id = job_id
+        t._agent_msgs.clear()
+        self._mask_launch(job_id, 0)
+        if self._jobs[job_id]["status"] == "failed":
+            return _err(self._jobs[job_id]["error"], kind="exception")
+        return _ok({"job_id": job_id})
+
+    def _mask_launch(self, job_id: str, tries: int) -> None:
+        """Start the tab's compute for ``job_id``. The previous worker's ``finished``
+        arrives a moment before the worker reports not-running, and ``_compute`` silently
+        does nothing while it is — so retry from a timer (never a nested event loop)
+        instead of leaving the job running forever."""
+        from PyQt5 import QtCore
+        t = self._mt
+        job = self._jobs[job_id]
+        if t._mask_worker is not None and t._mask_worker.isRunning():
+            if tries > 200:
+                job.update(status="failed", error="the previous mask worker did not exit")
+                return
+            QtCore.QTimer.singleShot(50, lambda: self._mask_launch(job_id, tries + 1))
+            return
+        try:
+            t._compute()
+            w = t._mask_worker
+            if job["status"] == "running" and w is not None:
+                w.progress.connect(lambda s, j=job_id: self._jobs[j]["_log"].append(str(s)))
+        except Exception:
+            job.update(status="failed", error=traceback.format_exc())
+
+    def _on_mask_compute_finished(self, ok: bool, message: str) -> None:
+        job = self._jobs.get(getattr(self, "_mask_job_id", None))
+        if not job or job["status"] != "running":
+            return
+        if not ok:
+            job.update(status="failed", error=message)
+            return
+        log = [x for x in job.get("_log", []) if x]
+        job.update(status="done", result={
+            **self._mask_summary(), "message": message, "log": log[-30:],
+            "warnings": [x for x in log if "skipped" in x]})
+
+    def op_mask_get_job(self, job_id) -> dict:
+        job = self._jobs.get(job_id)
+        if job is None:
+            return _err(f"unknown job_id {job_id!r}", kind="bad_args")
+        return _ok({k: v for k, v in job.items() if not k.startswith("_")})
+
+    # ── load / save / log ──
+    def op_mask_load_existing(self, path) -> dict:
+        """Load a mask TIFF (non-zero = bad) as the computed mask, replacing it (drawn shapes stay)."""
+        import tifffile
+        t = self._mt
+        path = str(path)
+        if not Path(path).exists():
+            return _err(f"not found: {path}", kind="bad_args")
+        try:
+            shape = tifffile.imread(path).shape
+        except Exception as e:
+            return _err(f"unreadable mask {path!r}: {e}", kind="bad_args")
+        if t._image is not None and tuple(shape) != tuple(t._image.shape):
+            return _err(f"mask is {shape[1]}x{shape[0]} but the image is "
+                        f"{t._image.shape[1]}x{t._image.shape[0]}", kind="bad_args")
+        t._agent_msgs.clear()
+        t._load_mask_edit.setText(path)
+        t._load_existing_mask()
+        if t._agent_msgs:
+            return self._mask_fail(f"could not load {path}")
+        return self._mask_reply("mask")
+
+    def op_mask_save(self, path=None) -> dict:
+        """Save the final mask (computed OR drawn; 1 = bad, uint8) as a TIFF."""
+        t = self._mt
+        if t._mask is None:
+            return _err("no mask yet — mask_compute, mask_load_existing or mask_apply_shapes first",
+                        kind="precondition_failed")
+        if path is not None:
+            t._save_edit.setText(str(path))
+        target = t._save_edit.text().strip()
+        if not target:
+            return _err("pass path", kind="bad_args")
+        t._agent_msgs.clear()
+        t._save()
+        if not Path(target).is_file() or any(k == "error" for k, _t, _x in t._agent_msgs):
+            return self._mask_fail(f"could not save {target}")
+        t._agent_msgs.clear()
+        return _ok({"path": target, **self._mask_summary()})
+
+    def op_mask_log_to_project(self) -> dict:
+        """Record this mask (parameters + array) as a new attempt in the open project."""
+        t = self._mt
+        if t._mask is None:
+            return _err("no mask yet", kind="precondition_failed")
+        if not t._project_ctx or not t._project_ctx.path:
+            return _err("no project open — project_save(path) first", kind="precondition_failed")
+        t._agent_msgs.clear()
+        t._log_to_project()
+        msgs = [(k, x) for k, _t, x in t._agent_msgs]
+        t._agent_msgs.clear()
+        if any(k != "info" for k, _x in msgs):
+            return _err("; ".join(x for _k, x in msgs), kind="exception")
+        return _ok({"attempt": msgs[-1][1].split(":\n")[-1] if msgs else None,
+                    "project": str(t._project_ctx.path)})
+
+    def op_mask_get_array(self, which: str = "mask") -> dict:
+        """The final mask (uint8, 1 = bad) or the current image frame, as a ``.npy`` file reference."""
+        t = self._mt
+        if which == "mask":
+            if t._mask is None:
+                return _err("no mask yet", kind="no_data")
+            return _ok({**self._mask_summary(), "array": _array_ref(t._mask, "mask")})
+        if which == "image":
+            if t._image is None:
+                return _err("no image loaded", kind="no_data")
+            return _ok({"array": _array_ref(t._image, "mask_image")})
+        return _err(f"unknown which {which!r} (mask/image)", kind="bad_args")
+
+    # ── hand-drawn shapes ──
+    def op_mask_add_shape(self, kind, center=None, size=None, angle=0.0, radius=None,
+                          r_outer=None, r_inner=None, points=None) -> dict:
+        """Add a drawn shape in RAW detector pixel coordinates (x = column, y = row; pixel
+        (c, r) covers [c, c+1]). kind: rectangle/oval (center, size [w, h], angle deg),
+        circle (center, radius), annulus (center, r_outer, r_inner), polygon (points).
+        Shapes only count once mask_apply_shapes runs."""
+        try:
+            idx = self._mt.agent_add_shape(kind, center=center, size=size, angle=angle, radius=radius,
+                                           r_outer=r_outer, r_inner=r_inner, points=points)
+        except ValueError as e:
+            return _err(e, kind="bad_args" if "load an image" not in str(e) else "precondition_failed")
+        return _ok({"index": idx, **self._mt.agent_list_shapes()})
+
+    def op_mask_add_points(self, points) -> dict:
+        """Pick single pixels to mask: [[col, row], ...] in raw detector pixels (needs mask_apply_shapes)."""
+        try:
+            n = self._mt.agent_add_points(points)
+        except ValueError as e:
+            return _err(e, kind="bad_args" if "load an image" not in str(e) else "precondition_failed")
+        return _ok({"added": n, **self._mt.agent_list_shapes()})
+
+    def op_mask_list_shapes(self) -> dict:
+        return _ok(self._mt.agent_list_shapes())
+
+    def op_mask_remove_shape(self, index) -> dict:
+        try:
+            self._mt.agent_remove_shape(int(index))
+        except ValueError as e:
+            return _err(e, kind="bad_args")
+        return _ok(self._mt.agent_list_shapes())
+
+    def op_mask_clear_shapes(self) -> dict:
+        """Clear Shapes: removes every drawn shape/point and the hand-drawn part of the mask."""
+        self._mt._clear_shapes()
+        return self._mask_reply("mask")
+
+    def op_mask_apply_shapes(self) -> dict:
+        """Apply shapes -> mask: rasterise every drawn shape/point into the mask (OR-ed with the computed one)."""
+        t = self._mt
+        if t._image is None:
+            return _err("load an image first", kind="precondition_failed")
+        if not t._shapes and not t._points:
+            return _err("nothing drawn — mask_add_shape / mask_add_points first", kind="precondition_failed")
+        t._apply_shapes()
+        return self._mask_reply("mask")
+
+
+
+class GuiController(_SolveCellOps, _ProjectOps, _HydraBatchOps, _MaskOps):
     """Dispatches ``"namespace.verb"`` ops (see the module docstring) against
     the live ``main_window``'s Data Viewer and Calibrate tabs."""
 
@@ -1488,6 +1973,11 @@ class GuiController(_SolveCellOps, _ProjectOps, _HydraBatchOps):
         if sc is not None:
             sc.set_agent_mode(True)
             sc.stageFinished.connect(self._on_sc_stage_finished)
+        mask = getattr(main_window, "_mask_tab", None)
+        if mask is not None:
+            mask.set_agent_mode(True)
+            mask.computeFinished.connect(self._on_mask_compute_finished)
+        self._mask_job_id = None   # the latest mask.compute job
         self._hb_queue = None    # the running/last hydra_batch.run_queue, if any
         self._hb_job_id = None
         self._sc_job_id = None   # the one in-flight Solve Cell job, if any
@@ -1510,7 +2000,8 @@ class GuiController(_SolveCellOps, _ProjectOps, _HydraBatchOps):
     # knowledge rather than control_server.py's, even though the *call* to
     # switch happens there (see that module's _handle_line).
     _NAMESPACE_TABS = {"data_viewer": "_view_tab", "calibrate": "_cal_tab",
-                       "solve_cell": "_solve_cell_tab", "hydra_batch": "_batch_tab"}
+                       "solve_cell": "_solve_cell_tab", "hydra_batch": "_batch_tab",
+                       "mask": "_mask_tab"}
 
     # Specific op -> a no-arg method on that op's own namespace tab widget
     # that brings the right *sub*-view to the front within it (e.g. the Data

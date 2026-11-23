@@ -2,7 +2,7 @@
 
 Lets an LLM agent — this one, or any other framework that speaks MCP —
 drive the live midas-gui application instead of a human clicking through
-it. Covers the Data Viewer, Calibrate and Solve Cell tabs.
+it. Covers the Data Viewer, Calibrate, Solve Cell, Hydra Batch and Mask Builder tabs.
 
 ```
 Agent  →  MCP server (this folder, separate process)  →  control socket
@@ -57,6 +57,8 @@ advertises them in its MCP `instructions` field.
 - `skills/midas-gui-mcp-project/` — saving and opening project `.h5` files.
 - `skills/midas-gui-mcp-hydra-batch/` — four-panel Hydra integration (`hydra_batch_*`): scans, calibration
   sets, caking/options, run, queue of datasets with their own calibrations, shared auto Rmax.
+- `skills/midas-gui-mcp-mask/` — the Mask Builder (`mask_*`): image/stack, threshold, statistical,
+  spike, cosmic-ray, azimuthal/learnable, dilation, drawn shapes, compute, save/log.
 - `skills/midas-gui-mcp-solve-cell/` — the whole Solve Cell sequence: inputs → suggest/apply
   parameters → ingest → material filter → index/refine → domain loop.
 
@@ -277,6 +279,17 @@ It is refused while the session has unsaved changes unless `discard_unsaved`.
 The window's message boxes are recorded instead of shown while these run, so a
 dialog cannot block the control socket.
 
+### Mask Builder
+
+`mask.*` (MCP tools `mask_*`) drive the Mask Builder tab one control group at a time: `set_image`,
+`set_frame`, `set_threshold`, `set_statistical`, `set_stack`, `set_spike`, `set_cosmic_ray`,
+`set_calibration`, `set_calibration_methods`, `set_postprocess`, `set_display`; `compute` returns a
+`job_id` for `mask.wait` / `mask.get_job`; `load_existing`, `save`, `log_to_project`, `get_array`;
+hand-drawn regions via `add_shape`, `add_points`, `list_shapes`, `remove_shape`, `clear_shapes`,
+`apply_shapes`; everything read back with `get_state`. The tab's dialogs are recorded, not shown, while the
+control API is attached (`MaskTab.set_agent_mode`). `project.save` stores the tab's settings and mask.
+`tests/test_mcp_mask_tool_coverage.py` fails if a control has no tool.
+
 ### Operations
 
 See `midas_gui/control_api.py`'s `op_*` methods for the authoritative list
@@ -288,7 +301,7 @@ docstring restates what it does.
 
 - **Scope**: Data Viewer, Calibrate, Solve Cell and Hydra Batch Integrate (`hydra_batch.*`:
   get_state, set_scans, set_calibration, set_caking, set_options, run, run_queue, get_job,
-  wait, abort). Mask generation and single-detector Batch (radial) Integrate are a later phase. Solve Cell does not yet expose
+  wait, abort). Single-detector Batch (radial) Integrate is a later phase (the Mask Builder is covered by `mask.*`). Solve Cell does not yet expose
   opening a project (`File ▸ Open Project` is dialog-driven) or the
   interactive 3-D camera / per-view widgets of the Diagnostics, Contamination
   and Inspector tabs beyond `set_view`; `solve_cell.save_project` is the one

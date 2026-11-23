@@ -32,6 +32,9 @@ from midas_gui import style as S
 
 class MaskTab(QtWidgets.QWidget):
     maskReady = QtCore.pyqtSignal(object)   # np.ndarray (uint8) or None
+    #: (ok, message) when a Compute Mask run ends — also for the worker-free
+    #: threshold-only path. The control API's ``mask.compute`` job resolves on it.
+    computeFinished = QtCore.pyqtSignal(bool, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -67,9 +70,27 @@ class MaskTab(QtWidgets.QWidget):
         self._img_frames: Optional[dict] = None
         self._img_frame_idx: int = 0
         self._project_ctx = None
+        # Control API (agent) mode: dialogs are recorded, not shown. See set_agent_mode.
+        self._agent_mode = False
+        self._agent_msgs: list = []     # [(kind, title, text)] since the last clear
         self._build_ui()
         if Path(self._img_edit.text().strip() or "x").exists():
             self._load_image()
+
+    def set_agent_mode(self, on: bool) -> None:
+        """While on (the control API sets it), message boxes become entries in
+        ``_agent_msgs`` instead of modal dialogs nothing could click. Interactive
+        use (off, the default) is unchanged."""
+        self._agent_mode = bool(on)
+
+    def _notify(self, kind: str, title: str, text: str) -> None:
+        """Show ``text`` as an info/warning/error box, or record it in agent mode."""
+        if self._agent_mode:
+            self._agent_msgs.append((kind, title, text))
+            return
+        box = {"info": QtWidgets.QMessageBox.information,
+               "warning": QtWidgets.QMessageBox.warning}.get(kind, QtWidgets.QMessageBox.critical)
+        box(self, title, text)
 
     def set_project_context(self, ctx):
         self._project_ctx = ctx
@@ -135,6 +156,14 @@ class MaskTab(QtWidgets.QWidget):
         self._paint_overlay()
         self._viewer._refresh_coord_bar()
 
+    @staticmethod
+    def _poly_vertices(roi) -> list:
+        """A PolyLineROI's vertices in its parent's (painted-image) coordinates.
+        pyqtgraph >= 0.14 returns plain points from ``getLocalHandlePositions``;
+        older versions returned handle items (``.pos()``)."""
+        return [roi.mapToParent(h.pos() if hasattr(h, "pos") else h)
+                for _i, h in roi.getLocalHandlePositions()]
+
     def _remap_drawn_items(self, old: tuple, new: tuple) -> None:
         """Move ROIs and picked points from the ``old`` painted frame to the
         ``new`` one so they keep covering the same detector pixels.
@@ -154,8 +183,7 @@ class MaskTab(QtWidgets.QWidget):
                     else [item["outer"], item["inner"]])
             for roi in rois:
                 if isinstance(roi, pg.PolyLineROI):
-                    pts = [roi.mapToParent(h.pos())
-                           for _i, h in roi.getLocalHandlePositions()]
+                    pts = self._poly_vertices(roi)
                     moved = [map_point_xy(p.x(), p.y(), shape, combo)[:2]
                              for p in pts]
                     roi.setPos((0, 0))
@@ -660,7 +688,7 @@ class MaskTab(QtWidgets.QWidget):
         with provider._buffer_lock:
             frames = list(provider._buffer) if (provider._buffer_frozen and provider._buffer) else None
         if not frames:
-            QtWidgets.QMessageBox.warning(self, "No buffer", "Source buffer is empty.")
+            self._notify("warning", "No buffer", "Source buffer is empty.")
             return
         old = self._stack_snapshot_file
         path = new_temp_h5_path()
@@ -748,14 +776,14 @@ class MaskTab(QtWidgets.QWidget):
     def _load_image(self):
         path = self._img_edit.text().strip()
         if not path or not Path(path).exists():
-            QtWidgets.QMessageBox.warning(self, "Error", "File not found."); return
+            self._notify("warning", "Error", "File not found."); return
         try:
             if Path(path).is_dir():
                 self._load_image_folder(path)
             else:
                 self._load_image_file(path)
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Load error", str(e))
+            self._notify("error", "Load error", str(e))
 
     def _load_image_folder(self, folder: str):
         """A folder of single-frame files — one frame per file, ordered like
@@ -925,7 +953,7 @@ class MaskTab(QtWidgets.QWidget):
 
     def _compute(self):
         if self._image is None:
-            QtWidgets.QMessageBox.warning(self, "No image", "Load an image first."); return
+            self._notify("warning", "No image", "Load an image first."); return
         if self._mask_worker and self._mask_worker.isRunning():
             return
         lower = self._lower.value(); upper = self._upper.value()
@@ -961,7 +989,9 @@ class MaskTab(QtWidgets.QWidget):
             }
 
         if not methods:
-            self._set_mask(thresh_mask); return
+            self._set_mask(thresh_mask)
+            self.computeFinished.emit(True, "threshold only")
+            return
 
         self._stat_prog.setText("Computing mask…")
         stack_paths, stack_hdf5 = self._stack_source()
@@ -1008,10 +1038,15 @@ class MaskTab(QtWidgets.QWidget):
 
     def _on_mask_done(self, mask: np.ndarray):
         self._set_mask(mask)
+        self.computeFinished.emit(True, self._stat_prog.text())
 
     def _on_stat_fail(self, msg: str):
         self._stat_prog.setText("Failed — check parameters.")
-        show_error(self, "Mask error", f"Statistical outlier mask failed:\n\n{msg}")
+        if self._agent_mode:
+            self._agent_msgs.append(("error", "Mask error", msg))
+        else:
+            show_error(self, "Mask error", f"Statistical outlier mask failed:\n\n{msg}")
+        self.computeFinished.emit(False, msg)
 
     def _set_mask(self, mask):
         """Set the *computed* mask (threshold/stat/loaded), apply pixel dilation,
@@ -1057,7 +1092,7 @@ class MaskTab(QtWidgets.QWidget):
 
     def _on_draw_toggled(self, on: bool):
         if on and self._image is None:
-            QtWidgets.QMessageBox.warning(self, "No image", "Load an image first.")
+            self._notify("warning", "No image", "Load an image first.")
             self._draw_check.setChecked(False); return
         self._draw_bar.setVisible(on)
         if not on:
@@ -1124,7 +1159,7 @@ class MaskTab(QtWidgets.QWidget):
 
     def _guard_draw(self) -> bool:
         if self._image is None:
-            QtWidgets.QMessageBox.warning(self, "No image", "Load an image first.")
+            self._notify("warning", "No image", "Load an image first.")
             return False
         return True
 
@@ -1135,6 +1170,143 @@ class MaskTab(QtWidgets.QWidget):
             if item["kind"] == "annulus" and roi in (item["outer"], item["inner"]):
                 self._viewer._iv.removeItem(item["outer"]); self._viewer._iv.removeItem(item["inner"])
                 self._shapes.remove(item); return
+
+    # ── Programmatic drawing (control API) ────────────────────────
+    #
+    # The same ROIs/points the toolbar buttons and mouse clicks create, placed
+    # from numbers instead. Coordinates are RAW detector coordinates in
+    # continuous pixel-edge units: x = column (Y), y = row (Z), and pixel
+    # (c, r) covers [c, c+1] x [r, r+1]. They are carried into the painted
+    # frame (the Data Viewer's Transforms) here, so a caller never has to know
+    # which way up the detector is being shown. Apply with ``_apply_shapes``.
+
+    SHAPE_KINDS = ("rectangle", "oval", "circle", "polygon", "annulus")
+
+    def agent_add_shape(self, kind: str, center=None, size=None, angle: float = 0.0,
+                        radius=None, r_outer=None, r_inner=None, points=None) -> int:
+        """Add one drawn shape; returns its index in :meth:`agent_list_shapes`.
+
+        rectangle / oval: ``center`` (x, y), ``size`` (width, height), ``angle`` in
+        degrees CCW about the centre. circle: ``center``, ``radius``. annulus:
+        ``center``, ``r_outer`` > ``r_inner`` >= 0 (the ring between them).
+        polygon: ``points`` [(x, y), ...] (>= 3 vertices, closed)."""
+        import math
+        if self._image is None:
+            raise ValueError("load an image first")
+        if kind not in self.SHAPE_KINDS:
+            raise ValueError(f"unknown shape kind {kind!r} (use one of {list(self.SHAPE_KINDS)})")
+        raw_shape = self._image.shape
+        codes = tuple(self._disp_codes)
+
+        def _xy(v, what):
+            try:
+                x, y = float(v[0]), float(v[1])
+            except Exception:
+                raise ValueError(f"{what} must be [x, y]") from None
+            if not (math.isfinite(x) and math.isfinite(y)):
+                raise ValueError(f"{what} must be finite")
+            return x, y
+
+        def _roi(cls, cx, cy, w, h, ang, pen, **kw):
+            a = math.radians(ang)
+            pos = (cx - (w / 2 * math.cos(a) - h / 2 * math.sin(a)),
+                   cy - (w / 2 * math.sin(a) + h / 2 * math.cos(a)))
+            if codes:
+                pos, sz, ang = map_roi_state(pos, (w, h), ang, raw_shape, codes)
+            else:
+                sz = (w, h)
+            roi = cls(tuple(pos), tuple(sz), pen=pen, **kw)
+            if ang:
+                roi.setAngle(ang)
+            return roi
+
+        if kind in ("rectangle", "oval"):
+            cx, cy = _xy(center, "center")
+            w, h = _xy(size, "size")
+            if w <= 0 or h <= 0:
+                raise ValueError("size must be positive")
+            cls = pg.RectROI if kind == "rectangle" else pg.EllipseROI
+            self._shapes.append({"kind": "shape", "roi": self._register(
+                _roi(cls, cx, cy, w, h, float(angle or 0.0), self._pen(), rotatable=True))})
+        elif kind == "circle":
+            cx, cy = _xy(center, "center")
+            if radius is None or float(radius) <= 0:
+                raise ValueError("radius must be positive")
+            d = 2 * float(radius)
+            self._shapes.append({"kind": "shape", "roi": self._register(
+                _roi(pg.CircleROI, cx, cy, d, d, 0.0, self._pen()))})
+        elif kind == "annulus":
+            cx, cy = _xy(center, "center")
+            if r_outer is None or r_inner is None or not (float(r_outer) > float(r_inner) >= 0):
+                raise ValueError("annulus needs r_outer > r_inner >= 0")
+            do, di = 2 * float(r_outer), 2 * float(r_inner)
+            outer = self._register(_roi(pg.EllipseROI, cx, cy, do, do, 0.0, self._pen(), rotatable=True))
+            inner = self._register(_roi(pg.EllipseROI, cx, cy, max(di, 1e-3), max(di, 1e-3), 0.0,
+                                        self._ipen(), rotatable=True))
+            self._shapes.append({"kind": "annulus", "outer": outer, "inner": inner})
+        else:  # polygon
+            pts = [_xy(p, "each polygon point") for p in (points or [])]
+            if len(pts) < 3:
+                raise ValueError("a polygon needs at least 3 points")
+            if codes:
+                pts = [map_point_xy(x, y, raw_shape, codes)[:2] for x, y in pts]
+            self._shapes.append({"kind": "shape", "roi": self._register(
+                pg.PolyLineROI([list(p) for p in pts], closed=True, pen=self._pen()))})
+        self._draw_check.setChecked(True)     # show the toolbar, as if drawn by hand
+        return len(self._shapes) - 1
+
+    def agent_add_points(self, points) -> int:
+        """Pick single pixels (what Point mode + clicks do). ``points`` is
+        [(col, row), ...] in raw detector pixels. Returns how many were added."""
+        if self._image is None:
+            raise ValueError("load an image first")
+        n_rows, n_cols = self._image.shape
+        codes = tuple(self._disp_codes)
+        added = 0
+        for p in points or []:
+            col, row = int(p[0]), int(p[1])
+            if not (0 <= row < n_rows and 0 <= col < n_cols):
+                raise ValueError(f"point ({col}, {row}) is outside the {n_cols}x{n_rows} detector")
+            c2, r2 = im_trans_map_point(col, row, (n_rows, n_cols), codes) if codes else (col, row)
+            self._points.append((c2, r2))
+            dot = pg.ScatterPlotItem([c2], [r2], symbol="s", size=6,
+                                     pen=pg.mkPen(None), brush=pg.mkBrush("#ff5a5a"))
+            dot.setZValue(21)
+            self._viewer._iv.addItem(dot)
+            self._point_items.append(dot)
+            added += 1
+        if added:
+            self._draw_check.setChecked(True)
+        return added
+
+    def agent_list_shapes(self) -> dict:
+        """Drawn shapes (kind + geometry in the painted frame) and picked points."""
+        def _roi(r):
+            return {"pos": [round(r.pos().x(), 3), round(r.pos().y(), 3)],
+                    "size": [round(r.size().x(), 3), round(r.size().y(), 3)],
+                    "angle": round(float(r.angle()), 3)}
+        out = []
+        for i, item in enumerate(self._shapes):
+            if item["kind"] == "annulus":
+                out.append({"index": i, "kind": "annulus",
+                            "outer": _roi(item["outer"]), "inner": _roi(item["inner"])})
+            elif isinstance(item["roi"], pg.PolyLineROI):
+                pts = self._poly_vertices(item["roi"])
+                out.append({"index": i, "kind": "polygon",
+                            "points": [[round(p.x(), 3), round(p.y(), 3)] for p in pts]})
+            else:
+                kind = ("rectangle" if isinstance(item["roi"], pg.RectROI) else
+                        "circle" if isinstance(item["roi"], pg.CircleROI) else "oval")
+                out.append({"index": i, "kind": kind, **_roi(item["roi"])})
+        return {"shapes": out, "points": [list(p) for p in self._points],
+                "frame": "painted (Data Viewer transforms applied)" if self._disp_codes else "raw"}
+
+    def agent_remove_shape(self, index: int) -> None:
+        """Remove shape ``index`` (as numbered by :meth:`agent_list_shapes`)."""
+        if not (0 <= int(index) < len(self._shapes)):
+            raise ValueError(f"no shape {index} (have {len(self._shapes)})")
+        item = self._shapes[int(index)]
+        self._remove_roi(item["roi"] if item["kind"] == "shape" else item["outer"])
 
     # ── Single-pixel point picking ────────────────────────────────
 
@@ -1198,9 +1370,8 @@ class MaskTab(QtWidgets.QWidget):
         """Seal the polygon: turn accumulated vertices into a PolyLineROI."""
         pts = self._freeform_pts
         if len(pts) < 3:
-            QtWidgets.QMessageBox.information(
-                self, "Too few vertices",
-                "Place at least 3 vertices before closing the shape.")
+            self._notify("info", "Too few vertices",
+                         "Place at least 3 vertices before closing the shape.")
             return
         # Remove live preview items
         self._cancel_freeform(keep_roi=True)
@@ -1281,7 +1452,7 @@ class MaskTab(QtWidgets.QWidget):
         if self._image is None:
             return
         if not self._shapes and not self._points:
-            QtWidgets.QMessageBox.information(self, "No shapes", "Draw a shape or pick points first.")
+            self._notify("info", "No shapes", "Draw a shape or pick points first.")
             return
         NZ, NY = self._disp_shape()
         drawn = np.zeros((NZ, NY), dtype=bool)
@@ -1323,6 +1494,9 @@ class MaskTab(QtWidgets.QWidget):
     def _save(self):
         if self._mask is None: return
         path = self._save_edit.text().strip()
+        if not path and self._agent_mode:
+            self._notify("warning", "No path", "Set the Save path first.")
+            return
         if not path:
             path, _ = QtWidgets.QFileDialog.getSaveFileName(
                 self, "Save Mask", "mask.tif", "TIFF (*.tif)")
@@ -1330,9 +1504,9 @@ class MaskTab(QtWidgets.QWidget):
         try:
             import tifffile
             tifffile.imwrite(str(path), self._mask)
-            QtWidgets.QMessageBox.information(self, "Saved", f"Mask saved:\n{path}")
+            self._notify("info", "Saved", f"Mask saved:\n{path}")
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Save error", str(e))
+            self._notify("error", "Save error", str(e))
 
     def _log_to_project(self):
         """Append this mask (full parameters + the resulting compressed
@@ -1345,9 +1519,8 @@ class MaskTab(QtWidgets.QWidget):
         if self._mask is None:
             return
         if not self._project_ctx or not self._project_ctx.path:
-            QtWidgets.QMessageBox.warning(
-                self, "No project open",
-                "Open or create a project first (File ▸ Open Project…) to log this mask.")
+            self._notify("warning", "No project open",
+                         "Open or create a project first (File ▸ Open Project…) to log this mask.")
             return
         cfg = {"fields": widgets_to_dict(self._state_widgets())}
         loader_state = {
@@ -1360,9 +1533,9 @@ class MaskTab(QtWidgets.QWidget):
             ref = project.append_mask_attempt(
                 self._project_ctx.path, cfg=cfg, mask=self._mask, loader_state=loader_state,
                 extra={"active_profile": settings.active_profile()})
-            QtWidgets.QMessageBox.information(self, "Logged to project", f"Mask attempt logged:\n{ref}")
+            self._notify("info", "Logged to project", f"Mask attempt logged:\n{ref}")
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Log to project failed", str(e))
+            self._notify("error", "Log to project failed", str(e))
 
     def apply_project_mask(self, meta: dict, mask_array: Optional[np.ndarray]) -> None:
         """Populate this tab from a recorded ``/analysis/mask`` attempt (see
@@ -1395,13 +1568,13 @@ class MaskTab(QtWidgets.QWidget):
     def _load_existing_mask(self):
         path = self._load_mask_edit.text().strip()
         if not path or not Path(path).exists():
-            QtWidgets.QMessageBox.warning(self, "Error", "File not found."); return
+            self._notify("warning", "Error", "File not found."); return
         try:
             import tifffile
             raw = tifffile.imread(path)
             self._set_mask((raw != 0).astype(np.uint8))
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Load error", str(e))
+            self._notify("error", "Load error", str(e))
 
     def get_mask(self) -> Optional[np.ndarray]:
         return self._mask
@@ -1482,6 +1655,11 @@ class MaskTab(QtWidgets.QWidget):
                 try:
                     import tifffile
                     raw = tifffile.imread(str(mask_path))
-                    self._set_mask((raw != 0).astype(np.uint8))
+                    # The sidecar is the FINAL mask (dilation already applied when it
+                    # was computed): set it directly, as apply_project_mask does --
+                    # _set_mask would dilate it a second time.
+                    self._computed_mask = (raw != 0)
+                    self._drawn_mask = None
+                    self._emit_final()
                 except Exception:
                     pass

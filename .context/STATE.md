@@ -1,8 +1,10 @@
 # Project state
 
-Last updated: 2026-11-20 (proportional default panel widths)
+Last updated: 2026-11-23 (Mask Builder bad-pixel settings)
 
 ## Now working on
+
+2026-11-23 (latest): **Mask Builder session** — chose fused silica as the bad-pixel dataset and saved `lauren_data_oct26/bad_px_project.h5` (DECISIONS 2026-11-23). Then **added the full Mask Builder MCP/control API** (`mask_*`, 25 tools; DECISIONS 2026-11-23 later); fixed the set_state double dilation and a polygon-remap crash on pyqtgraph 0.14. Uncommitted on `main`; real MCP server not run (no `mcp` in env). Azimuthal clip untested on real data.
 
 2026-11-20 (latest): **Panel widths are now proportional by default** (Data 14 %, Controls 27 %, Results keeps >=48 %; remembered as fractions under `layout2/`, old pixel keys ignored; DECISIONS 2026-11-20). Uncommitted on `hydra_ui`; offscreen-checked, not on cocoa. Window minimum width fixed too (was 1760 px from the Zarr Viewer's control rows, now 1185 px; DECISIONS follow-up).
 

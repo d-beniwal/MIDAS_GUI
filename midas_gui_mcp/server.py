@@ -1,4 +1,4 @@
-"""MCP server for midas-gui's Data Viewer, Calibrate and Solve Cell tabs.
+"""MCP server for midas-gui's Data Viewer, Calibrate, Solve Cell, Hydra Batch and Mask Builder tabs.
 
 A thin proxy: every tool here does nothing but serialize its arguments,
 send them to the running midas-gui instance's control socket (via
@@ -22,12 +22,12 @@ from mcp.server.mcpserver import MCPServer
 from client import ControlClient, ControlError
 
 _INSTRUCTIONS = """\
-Drives the live midas-gui app (Data Viewer, Calibrate, Solve Cell, Hydra Batch Integrate).
+Drives the live midas-gui app (Data Viewer, Calibrate, Solve Cell, Hydra Batch Integrate, Mask Builder).
 Before driving a tab, read the matching skill under midas_gui_mcp/skills/
 (in the midas-gui repo): midas-gui-mcp-setup (launch, register, socket
 troubleshooting) and midas-gui-mcp-calibrate (calibration gotchas: calibrant,
 wavelength/pixel size, seeds, polling, abort) and midas-gui-mcp-project (save/
-open project .h5 files). Tools are thin proxies; state
+open project .h5 files) and midas-gui-mcp-mask (building a bad-pixel mask). Tools are thin proxies; state
 persists in the GUI between calls, so check it with *_get_state."""
 
 mcp = MCPServer("midas-gui", instructions=_INSTRUCTIONS)
@@ -920,6 +920,213 @@ def hydra_batch_wait(job_id: str, timeout: float = 600.0) -> Any:
 def hydra_batch_abort() -> Any:
     """Abort the running Hydra batch run (and stop a running queue)."""
     return _call("hydra_batch.abort")
+
+
+# ── Mask Builder ─────────────────────────────────────────────────────
+# One tool per control group of the Mask Builder tab. Typical flow:
+# mask_set_image -> mask_set_threshold (AFTER the image: loading resets the
+# upper threshold) -> mask_set_statistical / mask_set_stack / spike / cosmic /
+# calibration methods / postprocess -> mask_compute -> mask_wait ->
+# (mask_add_shape + mask_apply_shapes) -> mask_save / project_save. Settings
+# persist in the GUI between calls; read them with mask_get_state. See the
+# midas-gui-mcp-mask skill.
+
+@mcp.tool()
+def mask_get_state() -> Any:
+    """Everything the Mask Builder shows: image (path, frame n/N, shape, dtype, range),
+    threshold, statistical, stack, spike, cosmic-ray, calibration + azimuthal/learnable,
+    dilation, display, the current mask (n_masked, percent, computed vs hand-drawn),
+    drawn shapes, whether a compute is running, and the open project."""
+    return _call("mask.get_state")
+
+
+@mcp.tool()
+def mask_set_image(path: str, dataset: Optional[str] = None, frame: Optional[int] = None) -> Any:
+    """Image field: a TIFF/HDF5/.geN file, a FOLDER of single-frame files (frame navigator),
+    or a multi-frame file. dataset = HDF5 dataset; frame is 1-based. Loading resets the
+    upper threshold to the dtype's maximum — call mask_set_threshold afterwards."""
+    return _call("mask.set_image", path=path, dataset=dataset, frame=frame)
+
+
+@mcp.tool()
+def mask_set_frame(frame: int) -> Any:
+    """Show frame N (1-based) of a multi-frame Image."""
+    return _call("mask.set_frame", frame=frame)
+
+
+@mcp.tool()
+def mask_set_threshold(lower: Optional[float] = None, upper: Optional[float] = None,
+                       projection: Optional[str] = None, skip_frames: Optional[int] = None) -> Any:
+    """1 · Threshold mask: pixels <= lower or > upper are masked (lower <= -1e9 disables the
+    lower test, upper <= 0 the upper one). projection (multi-frame Image only): "Current frame",
+    "Average", "Sum" or "Max" — build the threshold from all frames; skip_frames drops leading
+    frames from that projection."""
+    return _call("mask.set_threshold", lower=lower, upper=upper, projection=projection,
+                 skip_frames=skip_frames)
+
+
+@mcp.tool()
+def mask_set_statistical(spatial: Optional[bool] = None, temporal: Optional[bool] = None,
+                         k_sigma: Optional[float] = None, hot_factor: Optional[float] = None,
+                         dead_factor: Optional[float] = None,
+                         frozen_frac: Optional[float] = None) -> Any:
+    """2 · Statistical auto-mask. spatial = outlier vs local 5x5 median (robust Z > k_sigma AND
+    pixel > hot_factor x local median = hot, or < dead_factor x = dead); uses the Stack's
+    temporal median, else the single image. temporal = frozen pixels (std < frozen_frac x Q75
+    of std; needs a Stack of >= 2 frames). Defaults 6 / 1.5 / 0.5 / 0.05."""
+    return _call("mask.set_statistical", spatial=spatial, temporal=temporal, k_sigma=k_sigma,
+                 hot_factor=hot_factor, dead_factor=dead_factor, frozen_frac=frozen_frac)
+
+
+@mcp.tool()
+def mask_set_stack(path: Optional[str] = None, dataset: Optional[str] = None,
+                   stride: Optional[int] = None, files: Optional[list[str]] = None) -> Any:
+    """The Stack used by spatial-outlier (temporal median), temporal-constancy and cosmic-ray:
+    a folder, a glob such as /data/*.tif, one TIFF/HDF5 file (3-D dataset), or an explicit
+    files list. path="" clears it. stride keeps every Nth frame. ONE stack per compute."""
+    return _call("mask.set_stack", path=path, dataset=dataset, stride=stride, files=files)
+
+
+@mcp.tool()
+def mask_set_spike(enabled: Optional[bool] = None, n_sigma: Optional[float] = None) -> Any:
+    """3 · Spatial spike rejection (Laplacian high-pass, robust sigma) on the single image."""
+    return _call("mask.set_spike", enabled=enabled, n_sigma=n_sigma)
+
+
+@mcp.tool()
+def mask_set_cosmic_ray(enabled: Optional[bool] = None, n_sigma: Optional[float] = None) -> Any:
+    """3b · Cosmic-ray rejection: temporal sigma-clip across the Stack (needs >= 3 frames);
+    flags any pixel that is an outlier in ANY frame."""
+    return _call("mask.set_cosmic_ray", enabled=enabled, n_sigma=n_sigma)
+
+
+@mcp.tool()
+def mask_set_calibration(path: Optional[str] = None, from_calibrate: bool = False) -> Any:
+    """Give the Mask Builder a calibration (needed for azimuthal / learnable): a geometry file
+    (MIDAS paramstest, calibration .json, pyFAI .poni) or from_calibrate=True for the Calibrate
+    tab's latest result."""
+    return _call("mask.set_calibration", path=path, from_calibrate=from_calibrate)
+
+
+@mcp.tool()
+def mask_set_calibration_methods(azimuthal: Optional[bool] = None,
+                                 azimuthal_n_sigma: Optional[float] = None,
+                                 learnable: Optional[bool] = None, learn_steps: Optional[int] = None,
+                                 learn_lr: Optional[float] = None,
+                                 learn_sparsity: Optional[float] = None) -> Any:
+    """4 · Calibration-based masks (need mask_set_calibration first): azimuthal sigma-clip
+    (per-(R, eta) ring outliers, azimuthal_n_sigma) and the learnable mask (steps, lr, sparsity)."""
+    return _call("mask.set_calibration_methods", azimuthal=azimuthal,
+                 azimuthal_n_sigma=azimuthal_n_sigma, learnable=learnable,
+                 learn_steps=learn_steps, learn_lr=learn_lr, learn_sparsity=learn_sparsity)
+
+
+@mcp.tool()
+def mask_set_postprocess(dilation: Optional[int] = None) -> Any:
+    """5 · Post-processing: grow every bad region by `dilation` pixels (0-50; 1 = full 3x3 block).
+    Applied to the computed mask before hand-drawn shapes are added."""
+    return _call("mask.set_postprocess", dilation=dilation)
+
+
+@mcp.tool()
+def mask_set_display(show_overlay: Optional[bool] = None, draw_mask: Optional[bool] = None,
+                     log: Optional[bool] = None, cmap: Optional[str] = None) -> Any:
+    """Viewer controls: bad-pixel overlay on/off, the Draw-mask toolbar, log scale, colormap."""
+    return _call("mask.set_display", show_overlay=show_overlay, draw_mask=draw_mask, log=log,
+                 cmap=cmap)
+
+
+@mcp.tool()
+def mask_compute() -> Any:
+    """Compute Mask with the current settings. Async: returns a job_id for mask_wait (a
+    threshold-only run finishes at once). The result has the mask summary, the worker log and
+    `warnings` for anything skipped (e.g. temporal constancy without a >= 2-frame stack)."""
+    return _call("mask.compute")
+
+
+@mcp.tool()
+def mask_wait(job_id: str, timeout: float = 300.0) -> Any:
+    """Block up to timeout seconds until the compute job leaves "running". Call again if still running."""
+    return _call("mask.wait", job_id=job_id, timeout=timeout)
+
+
+@mcp.tool()
+def mask_get_job(job_id: str) -> Any:
+    """Non-blocking status/result of a mask_compute job."""
+    return _call("mask.get_job", job_id=job_id)
+
+
+@mcp.tool()
+def mask_load_existing(path: str) -> Any:
+    """Load a mask TIFF (non-zero = bad) as the computed mask, replacing it; hand-drawn shapes stay.
+    Must match the loaded image's shape."""
+    return _call("mask.load_existing", path=path)
+
+
+@mcp.tool()
+def mask_save(path: Optional[str] = None) -> Any:
+    """Save the final mask (computed OR hand-drawn; uint8, 1 = bad) as a TIFF."""
+    return _call("mask.save", path=path)
+
+
+@mcp.tool()
+def mask_log_to_project() -> Any:
+    """Log to Project: record the mask (parameters + array) as a new attempt in the open project
+    (project_save first if none is open). project_save also stores the mask and the tab's settings."""
+    return _call("mask.log_to_project")
+
+
+@mcp.tool()
+def mask_get_array(which: str = "mask") -> Any:
+    """The final mask (which="mask", uint8, 1 = bad) or the displayed image frame (which="image")
+    as a .npy file reference — read it with numpy, it is never inlined."""
+    return _call("mask.get_array", which=which)
+
+
+@mcp.tool()
+def mask_add_shape(kind: str, center: Optional[list[float]] = None,
+                   size: Optional[list[float]] = None, angle: float = 0.0,
+                   radius: Optional[float] = None, r_outer: Optional[float] = None,
+                   r_inner: Optional[float] = None,
+                   points: Optional[list[list[float]]] = None) -> Any:
+    """Add a hand-drawn region in RAW detector pixel coordinates (x = column, y = row; pixel
+    (c, r) covers [c, c+1]). kind: "rectangle" / "oval" (center [x, y], size [w, h], angle deg),
+    "circle" (center, radius), "annulus" (center, r_outer, r_inner: masks the ring between),
+    "polygon" (points [[x, y], ...], >= 3). Has no effect on the mask until mask_apply_shapes."""
+    return _call("mask.add_shape", kind=kind, center=center, size=size, angle=angle, radius=radius,
+                 r_outer=r_outer, r_inner=r_inner, points=points)
+
+
+@mcp.tool()
+def mask_add_points(points: list[list[int]]) -> Any:
+    """Pick single pixels to mask: [[col, row], ...] in raw detector pixels (the Point tool).
+    Needs mask_apply_shapes."""
+    return _call("mask.add_points", points=points)
+
+
+@mcp.tool()
+def mask_list_shapes() -> Any:
+    """The drawn shapes (indexed, with geometry) and picked points."""
+    return _call("mask.list_shapes")
+
+
+@mcp.tool()
+def mask_remove_shape(index: int) -> Any:
+    """Remove drawn shape `index` (numbering from mask_list_shapes)."""
+    return _call("mask.remove_shape", index=index)
+
+
+@mcp.tool()
+def mask_clear_shapes() -> Any:
+    """Clear shapes: remove every drawn shape/point AND the hand-drawn part of the mask."""
+    return _call("mask.clear_shapes")
+
+
+@mcp.tool()
+def mask_apply_shapes() -> Any:
+    """Apply shapes -> mask: rasterise every drawn shape/point and OR it into the mask."""
+    return _call("mask.apply_shapes")
+
 
 
 if __name__ == "__main__":

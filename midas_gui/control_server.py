@@ -37,7 +37,7 @@ _POLL_INTERVAL_MS = 100
 # _dispatch_async and its docstring for why a nested event-loop wait inside
 # a single dispatch() call is unsafe.
 _ASYNC_OPS = frozenset({"calibrate.wait", "calibrate.run_frozen_point_then_oneshot",
-                        "solve_cell.wait", "hydra_batch.wait"})
+                        "solve_cell.wait", "hydra_batch.wait", "mask.wait"})
 
 # QLocalServer's underlying Unix-domain-socket path is a Qt implementation
 # detail (and varies by platform/version), so rather than have
@@ -191,6 +191,11 @@ class ControlServer(QtCore.QObject):
             deadline = time.monotonic() + float(args.get("timeout", 600.0))
             self._poll_job(sock, req_id, job_id, deadline,
                            getter=self.controller.op_hydra_batch_get_job)
+        elif op == "mask.wait":
+            job_id = args.get("job_id")
+            deadline = time.monotonic() + float(args.get("timeout", 300.0))
+            self._poll_job(sock, req_id, job_id, deadline,
+                           getter=self.controller.op_mask_get_job)
         elif op == "calibrate.run_frozen_point_then_oneshot":
             self._run_frozen_point_then_oneshot(sock, req_id, args)
 
