@@ -1929,6 +1929,8 @@ def main():
     _install_diagnostics()
     _apply_ui_scale()   # must precede QApplication construction
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    from midas_gui import file_dialogs
+    file_dialogs.install()  # sidebar lists every mounted external volume
     app.setApplicationName("MIDAS GUI")
     S.apply_theme(app, _CHECKMARK_SVG, _ARROW_UP_SVG, _ARROW_DOWN_SVG)
 

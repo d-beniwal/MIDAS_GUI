@@ -1198,8 +1198,22 @@ class BrowseFilesDialog(QtWidgets.QDialog):
         self._tree.selectionModel().selectionChanged.connect(self._on_selection_changed)
         # Name column defaults to Qt's stock 100px header section — double it
         # so folder/file names aren't immediately elided.
-        self._tree.setColumnWidth(0, self._tree.columnWidth(0) * 2)
-        layout.addWidget(self._tree, 1)
+        # Name column always fits the longest filename; the other columns stay
+        # fit their content and the last one absorbs leftover space.
+        hdr = self._tree.header()
+        hdr.setStretchLastSection(True)
+        hdr.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeToContents)
+        for col in (1, 2):
+            hdr.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeToContents)
+        self._tree.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAsNeeded)
+        # Side panel: common places + every mounted external drive (live).
+        from midas_gui.file_dialogs import LocationsPanel
+        self._loc_panel = LocationsPanel()
+        self._loc_panel.pathChosen.connect(self._navigate)
+        body = QtWidgets.QHBoxLayout(); body.setSpacing(6)
+        body.addWidget(self._loc_panel)
+        body.addWidget(self._tree, 1)
+        layout.addLayout(body, 1)
 
         self._stem_row = QtWidgets.QWidget()
         sr = QtWidgets.QHBoxLayout(self._stem_row)
